@@ -8,7 +8,8 @@ from ternair.model.block import RMSNorm, TernairBlock
 from ternair.model.ssm import TernarySSMBlock
 from ternair.model.thalamus import ThalamicBottleneck
 from ternair.model.hybrid_block import TernairHybridBlock
-from ternair.model.generation import generate
+from ternair.model.generation import generate, generate_stream, format_chat_prompt, decode_tokens
+from ternair.model.export import export_to_safetensors, export_huggingface_package, compute_compression_report, print_compression_report
 from ternair.model.size_profiles import tiny_profile, base_profile, one_gb_profile
 
 __all__ = [
@@ -23,6 +24,13 @@ __all__ = [
     "ThalamicBottleneck",
     "TernairHybridBlock",
     "generate",
+    "generate_stream",
+    "format_chat_prompt",
+    "decode_tokens",
+    "export_to_safetensors",
+    "export_huggingface_package",
+    "compute_compression_report",
+    "print_compression_report",
     "tiny_profile",
     "base_profile",
     "one_gb_profile",
