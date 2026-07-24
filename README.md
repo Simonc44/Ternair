@@ -40,8 +40,10 @@ Ternair est une implementation de production de **BitNet b1.58**, une architectu
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Installer ternair directement depuis GitHub
-pip install git+https://github.com/Simonc44/Ternair.git
+# Cloner et installer ternair depuis GitHub
+git clone https://github.com/Simonc44/Ternair.git
+cd Ternair
+pip install -e .
 
 # Afficher la configuration par defaut
 python -m ternair info

@@ -27,7 +27,7 @@ jobs:
 
       - name: Install package and dependencies
         run: |
-          pip install -e src/ternair
+          pip install -e .
 
       - name: Verify CLI help
         run: |

@@ -26,7 +26,6 @@ jobs:
 
       - name: Build package
         run: |
-          cd src/ternair
           python -m build
 
       - name: Extract version from tag
@@ -53,6 +52,6 @@ jobs:
           name: Ternair v${{ steps.get_version.outputs.version }}
           body: ${{ steps.release_notes.outputs.notes }}
           files: |
-            src/ternair/dist/*.whl
-            src/ternair/dist/*.tar.gz
+            dist/*.whl
+            dist/*.tar.gz
           generate_release_notes: true

@@ -39,12 +39,9 @@ ternair = "ternair.cli:main"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["ternair*", "ternair.*"]
+where = ["src"]
+include = ["ternair", "ternair.*"]
 exclude = ["tests*", "tests.*"]
 
 [tool.setuptools.package-data]
 ternair = ["py.typed", "README.md"]
-
-# Conftest-free, opt-in: nothing to configure here. Tests just add
-# `src/` to sys.path or `pip install -e src/ternair`.
