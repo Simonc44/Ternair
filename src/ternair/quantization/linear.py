@@ -95,9 +95,49 @@ class TernairLinear(nn.Module):
         self._packed_shape: tuple[int, int] | None = None
         self._pack_kind: StorageMode | None = None
 
+        # Alpha appris pour QAT (facteur d'echelle entrainable par canal)
+        # Si active, remplace le gamma calcule par un parametre appris.
+        self._use_learned_alpha = False
+        self.alpha: nn.Parameter | None = None
+
         nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
         if self.bias is not None:
             nn.init.zeros_(self.bias)
+
+    # ------------------------------------------------------------------
+    # Alpha appris (QAT) - facteur d'echelle entrainable par canal
+    # ------------------------------------------------------------------
+    def enable_learned_alpha(self) -> None:
+        """Active l'alpha appris pour la distillation QAT.
+
+        Le facteur d'echelle alpha devient un parametre entrainable
+        par canal (out_features, 1). Au lieu de calculer gamma = mean(|W|),
+        on utilise alpha comme facteur d'echelle :
+            W_quant = round(clamp(W / alpha, -1, 1)) * alpha
+        """
+        if self.alpha is None:
+            # Initialiser alpha avec la moyenne des poids (comme gamma)
+            init_val = self.weight.data.abs().mean(dim=-1, keepdim=True).clamp_min(1e-8)
+            self.alpha = nn.Parameter(init_val.to(torch.float32))
+        self._use_learned_alpha = True
+
+    def disable_learned_alpha(self) -> None:
+        """Desactive l'alpha appris et revient au gamma calcule."""
+        self._use_learned_alpha = False
+
+    def _get_scale(self) -> Tensor:
+        """Retourne le facteur d'echelle (alpha appris ou gamma calcule)."""
+        if self._use_learned_alpha and self.alpha is not None:
+            return self.alpha.to(self.weight.dtype)
+        return _compute_gamma(self.weight, dim=-1)
+
+    def _ternarize_with_scale(self, w: Tensor, scale: Tensor) -> Tensor:
+        """Ternarise avec un facteur d'echelle et STE."""
+        w_norm = w / scale
+        w_clip = torch.clamp(w_norm, -1.0, 1.0)
+        w_t = torch.round(w_clip)
+        # STE : gradient traverse round comme identite
+        return w_t + (w_norm - w_norm.detach()), w_t
 
     # ------------------------------------------------------------------
     # Quantisation helpers
@@ -107,6 +147,10 @@ class TernairLinear(nn.Module):
         """Ternarise the current FP weight, returning ``(trits, gamma)``."""
         from ternair.quantization.ternary import ternarize as _ternarize
 
+        if self._use_learned_alpha and self.alpha is not None:
+            scale = self.alpha.to(self.weight.dtype)
+            w_t, _ = self._ternarize_with_scale(self.weight.data, scale)
+            return w_t.to(torch.int8), self.alpha.to(torch.float32)
         return _ternarize(self.weight.data, dim=-1)
 
     @torch.no_grad()
@@ -151,8 +195,13 @@ class TernairLinear(nn.Module):
     # Forward pass
     # ------------------------------------------------------------------
     def _training_forward(self, x: Tensor) -> Tensor:
-        gamma = _compute_gamma(self.weight, dim=-1)
-        w_eff = ternary_linear_forward(self.weight, gamma)
+        if self._use_learned_alpha and self.alpha is not None:
+            scale = self.alpha.to(self.weight.dtype)
+            w_eff, _ = self._ternarize_with_scale(self.weight, scale)
+            w_eff = scale * w_eff
+        else:
+            gamma = _compute_gamma(self.weight, dim=-1)
+            w_eff = ternary_linear_forward(self.weight, gamma)
         return F.linear(x, w_eff, self.bias)
 
     def _eval_forward(self, x: Tensor) -> Tensor:
