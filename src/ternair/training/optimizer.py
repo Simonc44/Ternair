@@ -69,7 +69,9 @@ def create_param_groups(
                 continue
 
             # RMSNorm / LayerNorm weight → no decay
-            if isinstance(module, (nn.LayerNorm,)) or "norm" in name.lower() and pname == "weight":
+            is_norm_module = isinstance(module, nn.LayerNorm)
+            is_norm_by_name = "norm" in name.lower() and pname == "weight"
+            if is_norm_module or is_norm_by_name:
                 no_decay_params.append(param)
                 continue
 

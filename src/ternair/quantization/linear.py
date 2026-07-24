@@ -209,22 +209,40 @@ class TernairLinear(nn.Module):
         return F.linear(x, weight, self.bias)
 
     def _dequantise(self, dtype: torch.dtype) -> Tensor:
+        """Dequantise les poids empaquetes pour l'inference en mode eval().
+
+        Corrige pour garantir que tous les tenseurs restent sur le
+        meme device (ex: cuda:0) -- evite les erreurs de device mismatch
+        lorsque le modele a ete deplace sur GPU.
+        """
         if self._pack_kind is None or self._packed_shape is None:
             raise RuntimeError(
                 "Call freeze_storage() before using the ternarised forward."
             )
+
+        # 1. Device dynamique : suivre le device du module
+        device = next(self.parameters()).device
+
+        # 2. Decompacter les trits sur le bon device
         if self._pack_kind == MODE_INT8:
-            trits_flat = self.packed_weight.to(torch.int8)
+            trits_flat = self.packed_weight.to(device=device, dtype=torch.int8)
         elif self._pack_kind == MODE_FASTPACKED:
             packed_np = self.packed_weight.cpu().numpy()
-            flat_np = unpack_trits_2bit(packed_np, length=int(np.prod(self._packed_shape)))
-            trits_flat = torch.from_numpy(flat_np)
+            flat_np = unpack_trits_2bit(
+                packed_np, length=int(np.prod(self._packed_shape))
+            )
+            trits_flat = torch.from_numpy(flat_np).to(device=device)
         else:
             trits_flat = packed_to_torch(
                 self.packed_weight.cpu().numpy(), shape=self._packed_shape
-            )
-        gamma = self.gamma_eval.to(dtype).unsqueeze(-1)
-        return (trits_flat.to(dtype).reshape(self._packed_shape)) * gamma
+            ).to(device=device)
+
+        # 3. Gamma sur le meme device
+        gamma = self.gamma_eval.to(dtype=dtype, device=device).unsqueeze(-1)
+
+        # 4. Tout sur le device cible
+        trits_tensor = trits_flat.to(dtype=dtype).reshape(self._packed_shape)
+        return trits_tensor * gamma
 
     def forward(self, x: Tensor) -> Tensor:
         if self.training or self._pack_kind is None:

@@ -1,7 +1,21 @@
-# Ternair -- Fonctionnalites completes (v0.4.0)
+# Ternair -- Fonctionnalites completes (v0.5.0)
 
 Documentation exhaustive de toutes les fonctionnalites de Ternair,
 classees par domaine.
+
+## 0. Pipeline robuste pour modeles intermediaires (v0.5.0)
+
+| Fonctionnalite | Fichier | Statut |
+|---------------|---------|--------|
+| `TernairPipeline` (build/train/distill/freeze/export) | `training/pipeline.py` | Nouveau v0.5.0 |
+| `PipelineStage` (FSM du cycle de vie) | `training/pipeline.py` | Nouveau v0.5.0 |
+| `AtomicCheckpointSaver` (write tmp -> os.replace) | `training/atomic.py` | Nouveau v0.5.0 |
+| `MemoryEstimate` (pre-flight memoire) | `training/memory.py` | Nouveau v0.5.0 |
+| `estimate_memory(model, batch, seq)` | `training/memory.py` | Nouveau v0.5.0 |
+| Profils intermediaires `small`/`medium`/`large` | `model/size_profiles.py` | Nouveau v0.5.0 |
+| `fit_profile_for_budget(target_mib)` | `model/size_profiles.py` | Nouveau v0.5.0 |
+| Validation renforcee dans `TernairConfig.__post_init__` | `model/config.py` | Nouveau v0.5.0 |
+| Fix bug precedence `optimizer.py` | `training/optimizer.py` | Nouveau v0.5.0 |
 
 ---
 

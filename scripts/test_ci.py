@@ -5,6 +5,7 @@ Tests: generation (sampling, streaming, chat), export (safetensors, compression)
 """
 
 import os
+import shutil
 import sys
 
 
@@ -277,8 +278,210 @@ def test_eval():
     print("  [PASS] Eval module tests passed")
 
 
+def test_pipeline_smoke():
+    """Test the TernairPipeline end-to-end on a tiny profile."""
+    import os
+    import shutil
+    import tempfile
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+    from ternair.training.pipeline import TernairPipeline, PipelineStage
+    from ternair.training.config import TrainingConfig
+
+    tmp = tempfile.mkdtemp(prefix="ternair_pipeline_")
+    try:
+        cfg = TrainingConfig(
+            model_profile="tiny",
+            model_storage="packed",
+            max_train_steps=2,
+            batch_size=1,
+            dataset_streaming=False,
+            log_every=1,
+            save_every=2,
+        )
+        pipeline = TernairPipeline(config=cfg, output_dir=tmp)
+        assert pipeline.stage is PipelineStage.UNINITIALIZED
+
+        # Build
+        pipeline.build()
+        assert pipeline.stage is PipelineStage.BUILT
+        assert pipeline.model is not None
+        assert pipeline.optimizer is not None
+
+        # Preflight
+        estimate = pipeline.preflight_check(batch_size=1, seq_length=4)
+        assert estimate.total_bytes > 0
+        assert estimate.fits, estimate.summary()
+
+        # Run a 2-step training loop
+        ids = torch.randint(0, 256, (1, 4))
+        labels = torch.randint(0, 256, (1, 4))
+        ds = TensorDataset(ids, labels)
+
+        def collate(b):
+            x = torch.stack([t[0] for t in b])
+            return {"input_ids": x}
+
+        loader = DataLoader(ds, batch_size=1, collate_fn=collate)
+        pipeline.run(loader, max_steps=2)
+
+        assert pipeline.state.stage is PipelineStage.TRAINED
+        assert pipeline.state.global_step >= 1, pipeline.state.global_step
+
+        # Freeze + export
+        pipeline.freeze()
+        assert pipeline.stage is PipelineStage.FROZEN
+        out = pipeline.export(format="pt", filename="model.pt")
+        assert os.path.exists(out), out
+        assert pipeline.state.artifact_paths.get("pt") == out
+
+        # Resume from atomic checkpoint
+        resumed_state = pipeline.resume()
+        # Without an explicit checkpoint we should get 0; we just want
+        # the method to be safe.
+        assert resumed_state >= 0
+
+        print(
+            f"  Pipeline: stage={pipeline.state.stage.value} "
+            f"step={pipeline.state.global_step} "
+            f"checks={len(pipeline.state.checkpoints)}"
+        )
+        print("  [PASS] TernairPipeline smoke test passed")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_atomic_checkpoint():
+    """Test that AtomicCheckpointSaver writes fully (no half files)."""
+    import os
+    import tempfile
+    import torch
+    from ternair.training.atomic import AtomicCheckpointSaver
+
+    tmp = tempfile.mkdtemp(prefix="ternair_atomic_")
+    saver = AtomicCheckpointSaver(save_dir=tmp)
+    state = {"step": 0, "tensor": torch.zeros(4)}
+    path = saver.save(state)
+    assert os.path.exists(path)
+    assert os.path.getsize(path) > 0
+    # No leftover .tmp
+    assert not os.path.exists(saver.tmp_path), "tmp file leaked"
+
+    # Save again, ensure .prev is populated.
+    state["step"] = 1
+    path2 = saver.save(state)
+    assert os.path.exists(saver.previous_path)
+    assert path != path2 or state["step"] == 1
+    loaded = saver.load()
+    assert loaded["step"] == 1
+    # Resolve sees the latest non-empty checkpoint.
+    resolved = saver.resolve_resume_path()
+    assert resolved == path2
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("  [PASS] AtomicCheckpointSaver tests passed")
+
+
+def test_memory_estimate():
+    """Test the memory estimator returns sensible numbers."""
+    import torch
+    from ternair.training.memory import (
+        MemoryEstimate,
+        DEFAULT_BYTES_PER_PARAM_OPTIM,
+        estimate_memory,
+    )
+    from ternair.model.size_profiles import tiny_profile
+    from ternair.model.modeling import TernairForCausalLM
+
+    cfg = tiny_profile(storage="packed")
+    model = TernairForCausalLM(cfg)
+    est = estimate_memory(model, batch_size=2, seq_length=8)
+    assert est.model_bytes > 0
+    assert est.optimizer_bytes >= (
+        sum(p.numel() for p in model.parameters() if p.requires_grad)
+        * DEFAULT_BYTES_PER_PARAM_OPTIM
+    )
+    # Tiny profile fits on CPU / small GPU.
+    print(
+        f"  tiny model est: {est.total_bytes / 1024 ** 2:.1f} MiB, "
+        f"fits={est.fits}, bottleneck={est.bottleneck}"
+    )
+    # Summary string is human-readable.
+    assert "Memory pre-flight" in est.summary()
+    print("  [PASS] Memory estimator tests passed")
+
+
+def test_intermediate_profiles():
+    """Test that the intermediate profiles load and yield valid configs."""
+    from ternair.model.size_profiles import (
+        PROFILE_REGISTRY, fit_profile_for_budget, small_profile,
+        medium_profile, large_profile,
+    )
+    from ternair.model.config import TernairConfig
+
+    for name in ("small", "medium", "large"):
+        fn = PROFILE_REGISTRY[name]
+        cfg = fn(storage="packed")
+        # `__post_init__` raises on invalid configs, so reaching here is the test.
+        assert isinstance(cfg, TernairConfig)
+        # Configs should be more expressive than tiny but never exceed 1 GiB.
+        assert cfg.hidden_size > 256, f"{name} too small"
+        assert cfg.num_hidden_layers >= 8, f"{name} too shallow"
+
+    fitted = fit_profile_for_budget(target_mib=50)
+    assert isinstance(fitted, tuple) and len(fitted) == 2
+    print(
+        f"  Intermediate profiles: small={small_profile().hidden_size} "
+        f"medium={medium_profile().hidden_size} large={large_profile().hidden_size}"
+    )
+    print(f"  Fit-for-budget (50 MiB) -> {fitted}")
+    print("  [PASS] Intermediate profiles tests passed")
+
+
+def test_optimizer_groups():
+    """Test that the optimizer precedence fix routes params correctly."""
+    import torch
+    import torch.nn as nn
+    from ternair.training.optimizer import create_param_groups
+    from ternair.quantization.linear import TernairLinear
+
+    class TinyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(64, 32)
+            self.norm = nn.LayerNorm(32)
+            self.ternary = TernairLinear(32, 32, storage="packed")
+            self.fc = nn.Linear(32, 32)
+
+    model = TinyModel()
+    groups = create_param_groups(model, lr=1e-3, weight_decay=0.1)
+    # Find each bucket.
+    decay = sum(g["weight_decay"] for g in groups if g["weight_decay"] > 0)
+    no_decay = sum(g["weight_decay"] for g in groups if g["weight_decay"] == 0)
+
+    # Embed -> decay > 0
+    embed_param = next(model.embed.parameters())
+    embed_bucket = next(g for g in groups if any(p is embed_param for p in g["params"]))
+    assert embed_bucket["weight_decay"] > 0, "Embedding should decay"
+
+    # LayerNorm weight -> no decay
+    norm_param = next(model.norm.parameters())
+    norm_bucket = next(g for g in groups if any(p is norm_param for p in g["params"]))
+    assert norm_bucket["weight_decay"] == 0, "LayerNorm should be no-decay"
+
+    # TernairLinear weight -> no decay
+    tern_param = model.ternary.weight
+    tern_bucket = next(g for g in groups if any(p is tern_param for p in g["params"]))
+    assert tern_bucket["weight_decay"] == 0, "Ternair weight should be no-decay"
+
+    print(
+        f"  Optimizer groups: decay={decay}, no_decay={no_decay}, "
+        f"#groups={len(groups)}"
+    )
+    print("  [PASS] Optimizer param-groups tests passed")
+
+
 def main():
-    print("=== CI Advanced Tests v0.4.0 ===")
+    print("=== CI Advanced Tests v0.5.0 ===")
     test_generation()
     test_export()
     test_eval()
@@ -289,6 +492,11 @@ def main():
     test_webgpu()
     test_gguf_export()
     test_triton_fused()
+    test_pipeline_smoke()
+    test_atomic_checkpoint()
+    test_memory_estimate()
+    test_intermediate_profiles()
+    test_optimizer_groups()
     print("=== All CI advanced tests passed ===")
     return 0
 

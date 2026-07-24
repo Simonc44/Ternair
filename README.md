@@ -17,7 +17,7 @@ Ternair est une implementation de production de **BitNet b1.58**, une architectu
 - Absence de cache KV lors de l'utilisation des couches SSM optionnelles (memoire de generation en O(1))
 - Compression de tokens K-WTA via le goulot thalamique (ThalamicBottleneck) : 32 latents fixes par sequence
 
-## Fonctionnalites (v0.3.0)
+## Fonctionnalites (v0.5.0)
 
 | Fonctionnalite | Statut |
 |----------------|--------|
@@ -48,6 +48,11 @@ Ternair est une implementation de production de **BitNet b1.58**, une architectu
 | **Ternary MoE (Melange d'Experts ternaires)** | **Nouveau v0.3.0** |
 | **WebGPU / WebAssembly backend navigateur** | **Nouveau v0.3.0** |
 | Projection de taille 1 Gio (942 Mio, 4,07 milliards de parametres) | Disponible |
+| **Pipeline modulaire (`TernairPipeline`)** | **Nouveau v0.5.0** |
+| **Sauvegarde atomique de checkpoint (anti-corruption)** | **Nouveau v0.5.0** |
+| **Estimateur memoire pre-flight (`estimate_memory`)** | **Nouveau v0.5.0** |
+| **Profils intermediaires (`small`, `medium`, `large`)** | **Nouveau v0.5.0** |
+| **Validation renforcee de `TernairConfig`** | **Nouveau v0.5.0** |
 
 ## Demarrage rapide
 
