@@ -1,3 +1,9 @@
+[![CI](https://github.com/Simonc44/Ternair/actions/workflows/ci.yml/badge.svg)](https://github.com/Simonc44/Ternair/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/pytorch-2.4%2B-orange)](https://pytorch.org/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/Simonc44/Ternair)](https://github.com/Simonc44/Ternair/releases)
+
 # Ternair
 
 **BitNet b1.58 -- Reseaux de neurones ternaires a l'echelle 1 Gio**
@@ -34,8 +40,8 @@ Ternair est une implementation de production de **BitNet b1.58**, une architectu
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Installer ternair
-pip install -e src/ternair
+# Installer ternair directement depuis GitHub
+pip install git+https://github.com/Simonc44/Ternair.git
 
 # Afficher la configuration par defaut
 python -m ternair info
