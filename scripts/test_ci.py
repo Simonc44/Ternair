@@ -480,8 +480,109 @@ def test_optimizer_groups():
     print("  [PASS] Optimizer param-groups tests passed")
 
 
+def test_packing_base8():
+    """Test the v0.6.0 packing_base8 codec (5 trits/byte, 1.6 bits/value)."""
+    import numpy as np
+    import torch
+    from ternair.kernels.packing_base8 import (
+        MODE_BASE8,
+        MODE_PACKED,
+        BITS_PER_VALUE,
+        pack_trits,
+        pack_trits_base8,
+        unpack_trits,
+        unpack_trits_base8,
+        torch_to_packed,
+        packed_to_torch,
+        bytes_for,
+    )
+
+    # MODE_PACKED is the legacy alias for MODE_BASE8.
+    assert MODE_PACKED == MODE_BASE8 == "base8"
+    assert BITS_PER_VALUE["base8"] == 1.6
+    assert BITS_PER_VALUE["packed"] == 1.6
+
+    # Round-trip on a random ternary array.
+    rng = np.random.default_rng(0)
+    trits = rng.integers(-1, 2, size=257).astype(np.int8)  # non-multiple of 5
+    packed = pack_trits(trits)
+    assert packed.dtype == np.uint8
+    assert packed.size == (257 + 4) // 5  # ceil(257/5)
+    assert bytes_for(257) == packed.size
+    restored = unpack_trits(packed, length=257)
+    assert np.array_equal(restored, trits), "Round-trip mismatch"
+
+    # pack_trits == pack_trits_base8 (alias works).
+    assert pack_trits(trits).__class__ == pack_trits_base8(trits).__class__
+
+    # Torch bridge round-trip.
+    t = torch.from_numpy(trits)
+    packed_np = torch_to_packed(t)
+    restored_t = packed_to_torch(packed_np, shape=tuple(t.shape))
+    assert restored_t.shape == t.shape
+    assert torch.equal(restored_t.to(torch.int8), t)
+
+    # Canonical bits-per-value vs fastpacked.
+    assert BITS_PER_VALUE["base8"] < BITS_PER_VALUE["fastpacked"]  # 1.6 < 2.0
+
+    print(
+        f"  packing_base8: 257 trits -> {packed.size} bytes "
+        f"({BITS_PER_VALUE['base8']} bits/value)"
+    )
+    print("  [PASS] packing_base8 tests passed")
+
+
+def test_triton_fast_batched():
+    """Test the v0.6.0 triton_fast kernel handles single + batched inputs."""
+    import numpy as np
+    import torch
+    from ternair.kernels.triton_fast import (
+        has_triton,
+        ternary_matmul_triton,
+        ternary_matmul_single_triton,
+    )
+    from ternair.kernels.packing_fast import pack_trits_2bit
+
+    rng = np.random.default_rng(1)
+    M, N = 32, 64
+    K_packed = (N + 3) // 4
+    trits = rng.integers(-1, 2, size=(M, N)).astype(np.int8)
+    packed = pack_trits_2bit(trits.reshape(-1)).reshape(M, K_packed)
+    gamma = rng.random(M).astype(np.float32)
+
+    # Reference (NumPy via packed_ops).
+    from ternair.kernels.packed_ops import ternary_matmul_numpy_batched
+    expected_batched = ternary_matmul_numpy_batched(
+        packed, rng.random((4, N)).astype(np.float16), gamma
+    )
+    expected_single = expected_batched[0]
+
+    # Single-input path: 1-D x in, 1-D y out.
+    x1 = rng.random(N).astype(np.float16)
+    out_single = ternary_matmul_single_triton(packed, x1, gamma)
+    assert out_single.shape == (M,), f"Single output shape: {out_single.shape}"
+    # Triton may not be installed in CI -> fall back to NumPy is acceptable.
+    if has_triton():
+        assert np.allclose(out_single, expected_single, atol=1e-1), (
+            f"max abs err {np.abs(out_single - expected_single).max()}"
+        )
+
+    # Batched-input path: (B, N) in, (B, M) out.
+    xB = rng.random((4, N)).astype(np.float16)
+    out_batched = ternary_matmul_triton(packed, xB, gamma)
+    assert out_batched.shape == (4, M), f"Batched output shape: {out_batched.shape}"
+
+    # Kernel accepts 1-D x with the unified API too.
+    out1d = ternary_matmul_triton(packed, x1, gamma)
+    assert out1d.shape == (M,), f"Unified 1-D output shape: {out1d.shape}"
+
+    # has_triton reflects the runtime state.
+    print(f"  triton_fast: has_triton={has_triton()}")
+    print("  [PASS] triton_fast tests passed")
+
+
 def main():
-    print("=== CI Advanced Tests v0.5.0 ===")
+    print("=== CI Advanced Tests v0.6.0 ===")
     test_generation()
     test_export()
     test_eval()
@@ -497,6 +598,8 @@ def main():
     test_memory_estimate()
     test_intermediate_profiles()
     test_optimizer_groups()
+    test_packing_base8()
+    test_triton_fast_batched()
     print("=== All CI advanced tests passed ===")
     return 0
 

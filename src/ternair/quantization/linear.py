@@ -13,6 +13,7 @@ supported:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import torch
@@ -20,16 +21,19 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ternair.kernels.packing_fast import pack_trits_2bit, unpack_trits_2bit
-from ternair.quantization.packing import (
-    MODE_INT8,
+from ternair.kernels.packing_base8 import (
+    MODE_BASE8,
     MODE_PACKED,
-    StorageMode,
     packed_to_torch,
     torch_to_packed,
 )
 from ternair.quantization.ternary import _compute_gamma, ternary_linear_forward
 
-MODE_FASTPACKED: StorageMode = "fastpacked"  # type: ignore[assignment]
+# v0.6.0: canonical storage names are "int8", "base8", "fastpacked".
+# "packed" remains as a legacy alias for "base8".
+StorageMode = Literal["int8", "base8", "packed", "fastpacked"]
+MODE_INT8: StorageMode = "int8"
+MODE_FASTPACKED: StorageMode = "fastpacked"
 
 
 @dataclass
@@ -67,7 +71,8 @@ class TernairLinear(nn.Module):
         storage: StorageMode = "int8",
     ) -> None:
         super().__init__()
-        if storage not in (MODE_INT8, MODE_PACKED, MODE_FASTPACKED):
+        # v0.6.0: accept canonical names + the legacy "packed" alias.
+        if storage not in (MODE_INT8, MODE_BASE8, MODE_PACKED, MODE_FASTPACKED, "packed"):
             raise ValueError(f"Unsupported storage mode {storage!r}")
         self.in_features = in_features
         self.out_features = out_features

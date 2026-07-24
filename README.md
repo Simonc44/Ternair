@@ -17,12 +17,14 @@ Ternair est une implementation de production de **BitNet b1.58**, une architectu
 - Absence de cache KV lors de l'utilisation des couches SSM optionnelles (memoire de generation en O(1))
 - Compression de tokens K-WTA via le goulot thalamique (ThalamicBottleneck) : 32 latents fixes par sequence
 
-## Fonctionnalites (v0.5.0)
+## Fonctionnalites (v0.6.0)
 
 | Fonctionnalite | Statut |
 |----------------|--------|
 | Quantification ternaire (STE, echelle gamma, 3 valeurs) | Disponible |
-| Conditionnement : base-3 (1,6 b/v) ou 2 bits (2,0 b/v) | Disponible |
+| Conditionnement : base-8 (1,6 b/v, `MODE_BASE8`) ou 2 bits (2,0 b/v) | Disponible |
+| **Codec canonique `packing_base8` (5 trits/octet)** | **Nouveau v0.6.0** |
+| **Kernel Triton unifie (single + batched, decodage bit-arithmetic)** | **Refactor v0.6.0** |
 | Noyau GPU (Triton -- decodage en boucle JIT) | Disponible |
 | Noyau CPU (C++ SIMD -- AVX-512 / ARM NEON) | Disponible |
 | Modele causal LM (attention GQA, RoPE, MLP SwiGLU ternaire) | Disponible |
@@ -53,6 +55,9 @@ Ternair est une implementation de production de **BitNet b1.58**, une architectu
 | **Estimateur memoire pre-flight (`estimate_memory`)** | **Nouveau v0.5.0** |
 | **Profils intermediaires (`small`, `medium`, `large`)** | **Nouveau v0.5.0** |
 | **Validation renforcee de `TernairConfig`** | **Nouveau v0.5.0** |
+| **Codec base-8 canonique + alias `MODE_PACKED` = `MODE_BASE8`** | **Nouveau v0.6.0** |
+| **Kernel `triton_fast` unifie (1-D + 2-D, grid `(M, B)`)** | **Nouveau v0.6.0** |
+| **Shims retrocompatibles (`quantization/packing.py`, `kernels/triton_matmul.py`)** | **Nouveau v0.6.0** |
 
 ## Demarrage rapide
 
@@ -367,6 +372,32 @@ Chaque trit `{-1, 0, +1}` est stocke sur 2 bits dans un octet `uint8` (4 trits/o
 trit = (bits & 1) - ((bits >> 1) & 1)  # -> {-1, 0, +1}
 ```
 
+### Conditionnement base-8 (1,6 bits/valeur, NOUVEAU v0.6.0)
+
+Le codec canonique vit dans `ternair.kernels.packing_base8` et encode 5 trits par octet en base 3 (poids `3**0..3**4`). L'ancien module `ternair.quantization.packing` est conserve comme shim retrocompatible ; `MODE_PACKED` reste un alias valide de `MODE_BASE8`.
+
+```python
+from ternair.kernels.packing_base8 import (
+    pack_trits_base8, unpack_trits_base8, bytes_for,
+)
+
+trits = ... # np.ndarray (N,) dtype int8
+packed = pack_trits_base8(trits)            # ceil(N/5) octets
+print(f"{packed.nbytes} bytes pour {trits.size} trits")
+```
+
+### Kernel Triton unifie (NOUVEAU v0.6.0)
+
+`ternair.kernels.triton_fast.ternary_matmul_triton` gere en une seule fonction les appels 1-D `(N,)` et 2-D `(B, N)` grace a une grille `(pid_m, pid_b)`. Le decodage des trits se fait par bit-arithmetic (aucune table de correspondance, aucun branchement).
+
+```python
+from ternair.kernels.triton_fast import ternary_matmul_triton
+
+# 1-D ou 2-D, meme API
+y_1d = ternary_matmul_triton(packed, x_1d, gamma)      # -> (M,)
+y_2d = ternary_matmul_triton(packed, x_batch, gamma)   # -> (B, M)
+```
+
 ### Rotation Hadamard (QuaRot)
 
 Avant quantification INT8 des activations, une transformee de Hadamard rapide O(n log n) redistribue les outliers sur toutes les dimensions, reduisant l'erreur de quantification sans ajouter de parametres.
@@ -427,11 +458,14 @@ src/ternair/
 │   ├── activation.py     # Hadamard + 8-bit + OmniQuant (v0.3.0)
 │   ├── bitdelta.py       # T-LoRA / BitDelta adapters (NOUVEAU v0.3.0)
 │   ├── distillation.py   # KL loss, Feature Matching, conversion HF
-│   └── packing.py        # Conditionnement base-3 et 2-bit
+│   └── packing.py        # Conditionnement base-3 (shim retrocompat v0.6.0)
 ├── kernels/
 │   ├── inference.h       # Runtime C++ header-only
 │   ├── webternair.py     # WebGPU / Wasm backend (NOUVEAU v0.3.0)
 │   ├── cpu_matmul.h      # AVX-512 / ARM NEON matmul
+│   ├── packing_base8.py  # Codec base-8 canonique (NOUVEAU v0.6.0)
+│   ├── triton_fast.py    # Kernel Triton unifie (NOUVEAU v0.6.0)
+│   ├── triton_matmul.py  # Shim retrocompat (v0.6.0)
 │   └── ...
 ├── model/
 │   ├── config.py         # Configuration + kv_cache_bits, num_experts
@@ -452,7 +486,7 @@ scripts/
 ├── train_one_gb.yaml     # Configuration 1 Gio
 ├── demo_reel.py          # Pipeline de demonstration complet
 ├── qat_distill.py        # Distillation QAT pour Colab
-├── test_ci.py            # Tests CI (8 tests, v0.3.0)
+├── test_ci.py            # Tests CI (17 tests v0.6.0 : generation, export, MoE, GGUF, pipeline, memory, packing_base8, triton_fast...)
 └── wordy_colab.py        # Script Colab Wordy
 ```
 

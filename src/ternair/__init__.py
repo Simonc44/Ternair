@@ -60,6 +60,17 @@ from ternair.benchmark.size import (
 )
 from ternair.kernels import MODE_FASTPACKED
 from ternair.kernels.packing_fast import pack_trits_2bit, unpack_trits_2bit
+from ternair.kernels.packing_base8 import (
+    MODE_BASE8,
+    MODE_PACKED,
+    BITS_PER_VALUE,
+    pack_trits_base8,
+    unpack_trits_base8,
+)
+from ternair.kernels.triton_fast import (
+    has_triton,
+    ternary_matmul_triton,
+)
 from ternair.training import cross_entropy, tokenise_corpus, train_one_step
 
 
@@ -71,10 +82,12 @@ __all__ = [
     "TernairLinearStorage",
     "TernaryStats",
     "pack_trits",
+    "pack_trits_base8",
     "quantize_activations_8bit",
     "ternarize",
     "ternarize_ste",
     "unpack_trits",
+    "unpack_trits_base8",
     # model
     "RMSNorm",
     "TernairAttention",
@@ -95,8 +108,13 @@ __all__ = [
     "model_size_bytes",
     # kernels
     "MODE_FASTPACKED",
+    "MODE_BASE8",
+    "MODE_PACKED",
+    "BITS_PER_VALUE",
     "pack_trits_2bit",
     "unpack_trits_2bit",
+    "has_triton",
+    "ternary_matmul_triton",
     # training
     "cross_entropy",
     "tokenise_corpus",

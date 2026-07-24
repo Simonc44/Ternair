@@ -1,9 +1,28 @@
-# Ternair -- Fonctionnalites completes (v0.5.0)
+# Ternair -- Fonctionnalites completes (v0.6.0)
 
 Documentation exhaustive de toutes les fonctionnalites de Ternair,
 classees par domaine.
 
-## 0. Pipeline robuste pour modeles intermediaires (v0.5.0)
+## 0. Compression reelle et kernels bas niveau (v0.6.0)
+
+| Fonctionnalite | Fichier | Statut |
+|---------------|---------|--------|
+| `packing_base8` (5 trits/octet, 1,6 b/v, codec canonique) | `kernels/packing_base8.py` | **Nouveau v0.6.0** |
+| `MODE_BASE8` (alias canonique de `MODE_PACKED`) | `kernels/packing_base8.py` | **Nouveau v0.6.0** |
+| `pack_trits_base8` / `unpack_trits_base8` | `kernels/packing_base8.py` | **Nouveau v0.6.0** |
+| `BITS_PER_VALUE` consolidé (int8/base8/fastpacked) | `kernels/packing_base8.py` | **Nouveau v0.6.0** |
+| `bytes_for(n_values)` (estimation taille) | `kernels/packing_base8.py` | **Nouveau v0.6.0** |
+| `triton_fast` (kernel Triton unifie `(N,)` + `(B, N)`) | `kernels/triton_fast.py` | **Nouveau v0.6.0** |
+| `ternary_matmul_triton` (API unique batch + single) | `kernels/triton_fast.py` | **Nouveau v0.6.0** |
+| `ternary_matmul_single_triton` (wrapper compat 1-D) | `kernels/triton_fast.py` | **Nouveau v0.6.0** |
+| `benchmark_triton_vs_numpy` (B=1..N, MxN) | `kernels/triton_fast.py` | **Nouveau v0.6.0** |
+| Decodage trit par bit-arithmetic (0 branchement) | `kernels/triton_fast.py` | **Nouveau v0.6.0** |
+| Shim retrocompat `quantization/packing.py` | `quantization/packing.py` | **Nouveau v0.6.0** |
+| Shim retrocompat `kernels/triton_matmul.py` | `kernels/triton_matmul.py` | **Nouveau v0.6.0** |
+
+---
+
+## 0bis. Pipeline robuste pour modeles intermediaires (v0.5.0)
 
 | Fonctionnalite | Fichier | Statut |
 |---------------|---------|--------|
@@ -43,8 +62,12 @@ classees par domaine.
 | Fonctionnalite | Fichier | Bits/valeur |
 |---------------|---------|-------------|
 | `int8` : 1 byte par trit | `quantization/packing.py` | 8.0 |
-| `packed` : 5 trits/byte (base-3) | `quantization/packing.py` | 1.6 |
+| `base8` (= `packed`) : 5 trits/byte (base-3) | `kernels/packing_base8.py` | 1.6 |
 | `fastpacked` : 4 trits/byte (2-bit) | `kernels/packing_fast.py` | 2.0 |
+
+> **v0.6.0** : le codec canonique vit dans `kernels/packing_base8.py`.
+> `quantization/packing.py` est conserve comme shim retrocompatible.
+> `MODE_PACKED` reste un alias valide de `MODE_BASE8`.
 
 ### Stockage et compression
 
@@ -234,7 +257,9 @@ src/ternair/
 │   ├── inference.h        # Runtime C++ header-only
 │   ├── cpu_matmul.h       # C++ SIMD AVX-512 / NEON
 │   ├── cpu_matmul.py      # Wrapper Python C++
-│   ├── triton_matmul.py   # Kernel Triton GPU
+│   ├── packing_base8.py   # Codec base-8 canonique (NOUVEAU v0.6.0)
+│   ├── triton_fast.py     # Kernel Triton unifie (NOUVEAU v0.6.0)
+│   ├── triton_matmul.py   # Shim retrocompat (v0.6.0)
 │   ├── triton_matmul_fused.py  # Triton batched (NOUVEAU v0.4.0)
 │   ├── gguf_export.py     # Export GGUF (NOUVEAU v0.4.0)
 │   ├── webternair.py      # WebGPU / Wasm
