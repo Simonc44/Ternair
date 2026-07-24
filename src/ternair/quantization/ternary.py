@@ -1,50 +1,133 @@
-"""Ternary weight quantization - BitNet b1.58 style.
+"""Ternary weight quantization — BitNet b1.58 style.
 
-Forward pass stores ``W_t = round(clamp(W / γ, -1, 1)) ∈ {-1, 0, +1}``.
-Backward pass uses STE so that the gradient flows through ``round`` as
-if it were the identity.
+Forward:   W_t = round(clamp(W / γ, -1, 1))  ∈  {-1, 0, +1}
+Backward:  STE — gradient flows through ``round`` as identity.
 
-Integrates Quantization Annealing (recuit de quantification) avec un
-parametre de temperature ``beta`` qui controle la douceur de la
-transition continu -> ternaire pendant le QAT.
+Quantization Annealing
+----------------------
+During QAT, a temperature ``beta`` controls the softness of the
+continuous-to-ternary transition:
+
+    beta  ≈  1   →  smooth tanh approximation  (early training)
+    beta  →  ∞   →  hard round()               (end of training)
+
+Key fix vs. previous version
+-----------------------------
+**Per-model state** via :class:`AnnealingState`.  The old
+``_global_beta`` module-level float was shared across *all* models in
+the same Python process, breaking multi-model training and
+multi-threaded evaluation.  Each model / optimizer now owns its own
+:class:`AnnealingState`, while a process-level default is kept for
+backward compatibility with code that calls the bare
+``set_quant_annealing_beta()`` API.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor, nn
 
 
 # ---------------------------------------------------------------------------
-# Annealing state (temperature beta globale)
+# AnnealingState — per-model, thread-safe beta holder
 # ---------------------------------------------------------------------------
 
-# Temperature de quantification pour le recuit (Quantization Annealing)
-# beta = 1.0 -> tres lisse (debut d'entrainement)
-# beta = 10.0+ -> proche de round() (fin d'entrainement)
-_global_beta: float = 1.0
+@dataclass
+class AnnealingState:
+    """Holds the current quantization-annealing temperature for one model.
+
+    Parameters
+    ----------
+    beta_start:
+        Initial temperature (smooth tanh, should be 1.0).
+    beta_end:
+        Final temperature (approximates hard round(), typically 10–15).
+
+    Usage
+    -----
+    .. code-block:: python
+
+        state = AnnealingState()
+        optimizer = ...  # your optimizer
+
+        for step in range(total_steps):
+            beta = state.step(step, total_steps)
+            # beta is automatically set on the state; ternary_linear_forward
+            # accepts it as an explicit argument to bypass the global default.
+    """
+
+    beta_start: float = 1.0
+    beta_end: float = 15.0
+    warmup_ratio: float = 0.1
+    _beta: float = field(default=1.0, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    @property
+    def beta(self) -> float:
+        with self._lock:
+            return self._beta
+
+    @beta.setter
+    def beta(self, value: float) -> None:
+        with self._lock:
+            self._beta = max(1.0, float(value))
+
+    def step(self, current_step: int, total_steps: int) -> float:
+        """Advance the schedule and return the new beta."""
+        beta = get_annealing_schedule(
+            current_step,
+            total_steps,
+            beta_start=self.beta_start,
+            beta_end=self.beta_end,
+            warmup_ratio=self.warmup_ratio,
+        )
+        self.beta = beta
+        return beta
+
+    def reset(self) -> None:
+        """Reset beta to beta_start (useful between training runs)."""
+        self.beta = self.beta_start
+
+
+def create_annealing_state(
+    beta_start: float = 1.0,
+    beta_end: float = 15.0,
+    warmup_ratio: float = 0.1,
+) -> AnnealingState:
+    """Factory for a per-model :class:`AnnealingState`.
+
+    Prefer this over the module-level ``set_quant_annealing_beta()`` when
+    training multiple models in the same process.
+    """
+    return AnnealingState(
+        beta_start=beta_start,
+        beta_end=beta_end,
+        warmup_ratio=warmup_ratio,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Process-level default — backward-compatible API
+# ---------------------------------------------------------------------------
+
+_default_state = AnnealingState()
 
 
 def set_quant_annealing_beta(beta: float) -> None:
-    """Modifie la temperature beta pour le recuit de quantification.
-    
-    Pendant le QAT, on augmente progressivement beta de 1.0 a 10.0+
-    pour passer d'une quantification douce (tanh) a une quantification
-    dure (round).
-    
-    Args:
-        beta: Temperature de quantification (>= 1.0)
+    """Set the process-level default annealing temperature.
+
+    .. deprecated::
+        Prefer :func:`create_annealing_state` for per-model isolation.
     """
-    global _global_beta
-    _global_beta = max(1.0, beta)
+    _default_state.beta = beta
 
 
 def get_quant_annealing_beta() -> float:
-    """Retourne la temperature beta actuelle."""
-    global _global_beta
-    return _global_beta
+    """Return the current process-level default beta."""
+    return _default_state.beta
 
 
 def get_annealing_schedule(
@@ -54,37 +137,41 @@ def get_annealing_schedule(
     beta_end: float = 15.0,
     warmup_ratio: float = 0.1,
 ) -> float:
-    """Calcule beta selon un schedule lineaire de recuit.
-    
-    Args:
-        current_step: Etape actuelle
-        total_steps: Nombre total d'etapes
-        beta_start: Valeur initiale de beta (douce)
-        beta_end: Valeur finale de beta (dure)
-        warmup_ratio: Proportion d'etapes en warmup (beta stable)
-    
-    Returns:
-        Valeur de beta pour l'etape courante
+    """Compute beta for a given step using a linear warmup-then-anneal schedule.
+
+    Parameters
+    ----------
+    current_step:
+        Current training step (0-indexed).
+    total_steps:
+        Total number of training steps.
+    beta_start:
+        Beta at the start (after warmup).
+    beta_end:
+        Beta at the end of training.
+    warmup_ratio:
+        Fraction of total_steps held at beta_start.
+
+    Returns
+    -------
+    float
+        The beta value for this step.
     """
     if total_steps <= 0:
         return beta_end
-    
+
     warmup_steps = int(total_steps * warmup_ratio)
-    
     if current_step < warmup_steps:
         return beta_start
-    
+
     progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
     progress = min(1.0, progress)
-    
-    # Croissance lineaire de beta_start a beta_end
     return beta_start + (beta_end - beta_start) * progress
 
 
 # ---------------------------------------------------------------------------
 # Gamma computation
 # ---------------------------------------------------------------------------
-
 
 @dataclass
 class TernaryStats:
@@ -99,20 +186,15 @@ class TernaryStats:
 
 
 def _compute_gamma(w: Tensor, dim: int = -1) -> Tensor:
-    """Per-row γ = mean(|W|) along ``dim``.
-
-    The original BitNet b1.58 paper uses ``mean(|W|)`` per output row; we
-    keep a separate γ per output channel so that each filter is scaled
-    independently. This mirrors the official reference implementation.
-    """
+    """Per-row scale γ = mean(|W|) along ``dim`` (BitNet b1.58 reference)."""
     return w.abs().mean(dim=dim, keepdim=True).clamp_min(1e-8)
 
 
 def ternarize(w: Tensor, dim: int = -1) -> tuple[Tensor, Tensor]:
-    """Inference-mode ternary quantization.
+    """Inference-mode ternary quantization — no gradient flow.
 
-    Quantises ``w`` along ``dim`` to ``{-1, 0, +1}`` and returns the
-    scale ``γ``. No gradient flow.
+    Returns ``(trits, gamma)`` with trits in ``{-1, 0, +1}`` (int8)
+    and gamma in float32.
     """
     gamma = _compute_gamma(w, dim=dim)
     w_norm = w / gamma
@@ -121,54 +203,50 @@ def ternarize(w: Tensor, dim: int = -1) -> tuple[Tensor, Tensor]:
     return w_ternary.to(torch.int8), gamma.to(torch.float32)
 
 
-def _tanh_ternarize(w: Tensor, scale: Tensor, beta: float) -> Tensor:
-    """Ternarisation douce via tanh pour le recuit de quantification.
-    
-    Au lieu de round(clamp(x, -1, 1)), on utilise :
-        W_proxy = tanh(beta * W / alpha) * alpha
-    
-    Quand beta -> inf, tanh(beta * x) -> sign(x) = {-1, 0, +1} approxime.
-    Quand beta est proche de 1, tanh donne une approximation differentiable.
-    """
-    w_norm = w / scale
-    # tanh beta * w_norm donne une approximation douce de sign()
-    w_tanh = torch.tanh(beta * w_norm)
-    return w_tanh * scale
-
-
 def ternarize_ste(
     w: Tensor,
     dim: int = -1,
     use_annealing: bool = True,
+    annealing_state: AnnealingState | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Training-mode ternary quantization with straight-through estimator.
 
-    Si ``use_annealing`` est True, utilise la temperature beta globale
-    pour un recuit progressif (tanh -> round) pendant le QAT.
+    Parameters
+    ----------
+    w:
+        FP weight tensor to ternarise.
+    dim:
+        Dimension along which to compute per-row gamma.
+    use_annealing:
+        If True, use the tanh approximation when beta > 1.
+    annealing_state:
+        Per-model :class:`AnnealingState`.  Falls back to the
+        process-level default if None.
 
-    Returns ``(w_t_effective, γ)`` where ``w_t_effective = γ · w_t``,
-    the gradient of which is treated as ``γ`` (i.e. the STE forwards
-    ``w_t`` but the backward pass replaces it with the identity on ``w``).
+    Returns
+    -------
+    (w_t_effective, gamma)
+        ``w_t_effective = gamma * w_t`` with STE in the backward pass.
     """
+    state = annealing_state if annealing_state is not None else _default_state
+    beta = state.beta
+
     gamma = _compute_gamma(w, dim=dim)
     w_norm = w / gamma
-    
-    if use_annealing and _global_beta > 1.0:
-        # Recuit : approximation differentiable via tanh
-        beta = _global_beta
+
+    if use_annealing and beta > 1.0:
         w_tanh = torch.tanh(beta * w_norm)
         w_effective = w_tanh + (w_norm - w_norm.detach())  # STE
         return (gamma * w_effective).to(w.dtype), gamma.to(torch.float32)
-    
+
     w_clip = torch.clamp(w_norm, -1.0, 1.0)
     w_ternary = torch.round(w_clip)
-    # Forward uses γ · w_t, backward treats it as γ · w (STE).
-    w_effective = w_ternary + (w_norm - w_norm.detach())
+    w_effective = w_ternary + (w_norm - w_norm.detach())  # STE
     return (gamma * w_effective).to(w.dtype), gamma.to(torch.float32)
 
 
 def stats_from(w_t: Tensor, gamma: Tensor) -> TernaryStats:
-    """Summarise the content of a ternarised tensor for diagnostics."""
+    """Summarise the content of a ternarised tensor."""
     flat_t = w_t.detach().reshape(-1).to(torch.int32)
     numel = int(flat_t.numel())
     num_pos = int((flat_t == 1).sum().item())
@@ -187,10 +265,8 @@ def stats_from(w_t: Tensor, gamma: Tensor) -> TernaryStats:
 class TernaryLinearFn(torch.autograd.Function):
     """Custom autograd function for ternary weights (STE).
 
-    Forward: return ``γ · round(clamp(W/γ, -1, 1))``.
-    Backward: pass through gradient as if the operation were identity
-    on the FP weights, but zero out the gradient w.r.t. ``γ`` (it has no
-    useful gradient in this simplified setting).
+    Forward:  gamma * round(clamp(W/gamma, -1, 1))  (or tanh approx)
+    Backward: pass gradient through as identity on W; zero for gamma.
     """
 
     @staticmethod
@@ -215,20 +291,29 @@ def ternary_linear_forward(
     w: Tensor,
     gamma: Tensor,
     beta: float | None = None,
+    annealing_state: AnnealingState | None = None,
 ) -> Tensor:
-    """Apply the ternary forward in a way that's autograd-friendly.
-    
-    Args:
-        w: Poids a ternariser
-        gamma: Facteur d'echelle calcule
-        beta: Temperature de recuit (None = utiliser globale)
+    """Apply the ternary forward in an autograd-friendly way.
+
+    Parameters
+    ----------
+    w, gamma:
+        Weight tensor and its scale.
+    beta:
+        Explicit temperature override.  If None, reads from
+        ``annealing_state`` (or the process-level default).
+    annealing_state:
+        Per-model :class:`AnnealingState` for isolation.
     """
     if beta is None:
-        beta = _global_beta
+        state = annealing_state if annealing_state is not None else _default_state
+        beta = state.beta
     return TernaryLinearFn.apply(w, gamma, beta)
 
 
 __all__ = [
+    "AnnealingState",
+    "create_annealing_state",
     "TernaryStats",
     "set_quant_annealing_beta",
     "get_quant_annealing_beta",
@@ -239,6 +324,5 @@ __all__ = [
     "ternary_linear_forward",
 ]
 
-
-# Avoid "unused" lint for nn (we may bring nn.SymmetricQuantize later)
+# Suppress unused-import lint for nn (reserved for future SymmetricQuantize)
 _ = nn

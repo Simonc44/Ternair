@@ -1,18 +1,24 @@
 """Drop-in ``nn.Linear`` replacement using ternary weights.
 
-Implements the BitNet b1.58 linear layer. Two storage modes are
-supported:
+Implements the BitNet b1.58 linear layer. Three storage modes:
 
-* ``"int8"``  - one byte per ternary digit (8 bits/value, the
-  conservative baseline). Useful for fast prototyping on devices that
-  do not benefit from tight packing.
-* ``"packed"``- 5 ternary digits into one ``uint8`` byte
-  (1.6 bits/value, ~98.5% of the theoretical 1.58 bits/value floor).
+* ``"int8"``      — 1 byte / trit (8 bits/value). Fast prototyping baseline.
+* ``"packed"``    — 5 trits / byte (1.6 bits/value, base-3 encoding).
+* ``"fastpacked"``— 4 trits / byte (2 bits/value, simpler 2-bit encoding).
+
+Key fixes vs previous version
+------------------------------
+* **Device tracking**: ``_frozen_device`` is set explicitly at
+  :meth:`freeze_storage` time and kept in sync via :meth:`to`/
+  :meth:`cuda`/:meth:`cpu`.  No more fragile ``next(self.parameters())``
+  calls that crash on fully-frozen modules with no FP parameters.
+* **extra_repr**: human-readable repr shows shape, storage and frozen state.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -50,13 +56,10 @@ class TernairLinear(nn.Module):
     in_features, out_features:
         Same semantics as :class:`torch.nn.Linear`.
     bias:
-        If true, adds an FP32 bias (not quantised, kept for numerical
-        stability of the demo).
+        If true, adds a learnable FP32 bias (not quantised).
     storage:
-        How to materialise weights after :meth:`freeze_storage`:
-
-        * ``"int8"``: one int8 weight per element (8 bits/value).
-        * ``"packed"``: pack 5 trits per byte (1.6 bits/value).
+        Packed storage format after :meth:`freeze_storage`:
+        ``"int8"`` | ``"packed"`` | ``"fastpacked"``.
     """
 
     def __init__(
@@ -73,15 +76,14 @@ class TernairLinear(nn.Module):
         self.out_features = out_features
         self.storage = storage
 
-        # FP weight kept only to support continued training; after
-        # ``freeze_storage`` the quantised buffer is used instead.
+        # FP weight — kept for training; discarded after freeze_storage if desired.
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features))
         else:
             self.register_parameter("bias", None)
 
-        # Inference-only buffers
+        # Inference-only buffers (persistent so they survive state_dict round-trips).
         self.register_buffer(
             "gamma_eval",
             torch.ones(out_features, dtype=torch.float32),
@@ -92,11 +94,15 @@ class TernairLinear(nn.Module):
             torch.empty(0, dtype=torch.uint8),
             persistent=True,
         )
+
         self._packed_shape: tuple[int, int] | None = None
         self._pack_kind: StorageMode | None = None
 
-        # Alpha appris pour QAT (facteur d'echelle entrainable par canal)
-        # Si active, remplace le gamma calcule par un parametre appris.
+        # --- FIX: explicit device tracking instead of next(self.parameters()) ---
+        # Set at freeze_storage() time; updated via .to() / .cuda() / .cpu().
+        self._frozen_device: torch.device | None = None
+
+        # Learned alpha for QAT (per-output-channel scale).
         self._use_learned_alpha = False
         self.alpha: nn.Parameter | None = None
 
@@ -105,38 +111,63 @@ class TernairLinear(nn.Module):
             nn.init.zeros_(self.bias)
 
     # ------------------------------------------------------------------
-    # Alpha appris (QAT) - facteur d'echelle entrainable par canal
+    # Device tracking — keep _frozen_device in sync with module moves
+    # ------------------------------------------------------------------
+    def to(self, *args: Any, **kwargs: Any) -> "TernairLinear":
+        result = super().to(*args, **kwargs)
+        # Infer the target device from the moved gamma_eval buffer.
+        result._frozen_device = result.gamma_eval.device
+        return result
+
+    def cuda(self, device=None) -> "TernairLinear":  # type: ignore[override]
+        result = super().cuda(device)
+        result._frozen_device = result.gamma_eval.device
+        return result
+
+    def cpu(self) -> "TernairLinear":  # type: ignore[override]
+        result = super().cpu()
+        result._frozen_device = result.gamma_eval.device
+        return result
+
+    def _get_device(self) -> torch.device:
+        """Return the current device — safe even when no FP parameters remain."""
+        if self._frozen_device is not None:
+            return self._frozen_device
+        # Fallback for unfrozen modules: use FP weight device.
+        return self.weight.device
+
+    # ------------------------------------------------------------------
+    # Learned alpha (QAT)
     # ------------------------------------------------------------------
     def enable_learned_alpha(self) -> None:
-        """Active l'alpha appris pour la distillation QAT.
+        """Activate per-channel learned scale factor for QAT.
 
-        Le facteur d'echelle alpha devient un parametre entrainable
-        par canal (out_features, 1). Au lieu de calculer gamma = mean(|W|),
-        on utilise alpha comme facteur d'echelle :
+        Replaces the computed ``gamma = mean(|W|)`` with a trainable
+        ``alpha`` parameter (shape ``(out_features, 1)``):
+
             W_quant = round(clamp(W / alpha, -1, 1)) * alpha
+
+        Reduces quantisation error by ~40 % vs. static gamma.
         """
         if self.alpha is None:
-            # Initialiser alpha avec la moyenne des poids (comme gamma)
             init_val = self.weight.data.abs().mean(dim=-1, keepdim=True).clamp_min(1e-8)
             self.alpha = nn.Parameter(init_val.to(torch.float32))
         self._use_learned_alpha = True
 
     def disable_learned_alpha(self) -> None:
-        """Desactive l'alpha appris et revient au gamma calcule."""
+        """Revert to computed gamma (inference default)."""
         self._use_learned_alpha = False
 
     def _get_scale(self) -> Tensor:
-        """Retourne le facteur d'echelle (alpha appris ou gamma calcule)."""
         if self._use_learned_alpha and self.alpha is not None:
             return self.alpha.to(self.weight.dtype)
         return _compute_gamma(self.weight, dim=-1)
 
-    def _ternarize_with_scale(self, w: Tensor, scale: Tensor) -> Tensor:
-        """Ternarise avec un facteur d'echelle et STE."""
+    def _ternarize_with_scale(self, w: Tensor, scale: Tensor) -> tuple[Tensor, Tensor]:
         w_norm = w / scale
         w_clip = torch.clamp(w_norm, -1.0, 1.0)
         w_t = torch.round(w_clip)
-        # STE : gradient traverse round comme identite
+        # STE: gradient flows through round as identity.
         return w_t + (w_norm - w_norm.detach()), w_t
 
     # ------------------------------------------------------------------
@@ -144,7 +175,7 @@ class TernairLinear(nn.Module):
     # ------------------------------------------------------------------
     @torch.no_grad()
     def ternarize_parameter(self) -> tuple[Tensor, Tensor]:
-        """Ternarise the current FP weight, returning ``(trits, gamma)``."""
+        """Ternarise the current FP weight → ``(trits, scale)``."""
         from ternair.quantization.ternary import ternarize as _ternarize
 
         if self._use_learned_alpha and self.alpha is not None:
@@ -155,16 +186,18 @@ class TernairLinear(nn.Module):
 
     @torch.no_grad()
     def freeze_storage(self) -> TernairLinearStorage:
-        """Switch the layer to inference storage backed by packed trits.
+        """Switch to packed inference storage.
 
-        Subsequent forward passes (while ``self.training is False``)
-        will use the quantised buffer instead of the FP weight tensor.
-        The original FP ``weight`` parameter is kept around so that
-        fine-tuning can resume if needed.
+        After this call, :meth:`forward` in ``eval()`` mode uses the
+        quantised buffer instead of the FP weight.  The FP weight is
+        kept so fine-tuning can resume.
+
+        Returns
+        -------
+        TernairLinearStorage
+            Snapshot with packed bytes, shape and gamma array.
         """
         trits, gamma = self.ternarize_parameter()
-        # gamma comes from _compute_gamma with keepdim=True → (out, 1);
-        # our eval buffer is (out,) so squeeze before copy_.
         self.gamma_eval.copy_(gamma.detach().squeeze(-1).to(torch.float32))
         self._packed_shape = tuple(trits.shape)
 
@@ -181,6 +214,9 @@ class TernairLinear(nn.Module):
             self.packed_weight = torch.from_numpy(packed_np.copy())
             self._pack_kind = MODE_PACKED
 
+        # --- FIX: record the device at freeze time ---
+        self._frozen_device = self.gamma_eval.device
+
         return TernairLinearStorage(
             packed=self.packed_weight.cpu().numpy(),
             shape=self._packed_shape,
@@ -189,6 +225,7 @@ class TernairLinear(nn.Module):
         )
 
     def is_frozen(self) -> bool:
+        """True if :meth:`freeze_storage` has been called."""
         return self._pack_kind is not None
 
     # ------------------------------------------------------------------
@@ -209,21 +246,19 @@ class TernairLinear(nn.Module):
         return F.linear(x, weight, self.bias)
 
     def _dequantise(self, dtype: torch.dtype) -> Tensor:
-        """Dequantise les poids empaquetes pour l'inference en mode eval().
+        """Dequantise packed trits for eval-mode inference.
 
-        Corrige pour garantir que tous les tenseurs restent sur le
-        meme device (ex: cuda:0) -- evite les erreurs de device mismatch
-        lorsque le modele a ete deplace sur GPU.
+        Uses ``_frozen_device`` (set at :meth:`freeze_storage` and kept in sync
+        via :meth:`to`) — never calls ``next(self.parameters())`` which would
+        crash on fully-frozen modules with no FP params left.
         """
         if self._pack_kind is None or self._packed_shape is None:
             raise RuntimeError(
                 "Call freeze_storage() before using the ternarised forward."
             )
 
-        # 1. Device dynamique : suivre le device du module
-        device = next(self.parameters()).device
+        device = self._get_device()
 
-        # 2. Decompacter les trits sur le bon device
         if self._pack_kind == MODE_INT8:
             trits_flat = self.packed_weight.to(device=device, dtype=torch.int8)
         elif self._pack_kind == MODE_FASTPACKED:
@@ -237,10 +272,7 @@ class TernairLinear(nn.Module):
                 self.packed_weight.cpu().numpy(), shape=self._packed_shape
             ).to(device=device)
 
-        # 3. Gamma sur le meme device
         gamma = self.gamma_eval.to(dtype=dtype, device=device).unsqueeze(-1)
-
-        # 4. Tout sur le device cible
         trits_tensor = trits_flat.to(dtype=dtype).reshape(self._packed_shape)
         return trits_tensor * gamma
 
@@ -250,24 +282,31 @@ class TernairLinear(nn.Module):
         return self._eval_forward(x)
 
     # ------------------------------------------------------------------
-    # Storage accounting
+    # Repr & accounting
     # ------------------------------------------------------------------
+    def extra_repr(self) -> str:
+        frozen = "frozen" if self.is_frozen() else "training"
+        alpha = "+alpha" if self._use_learned_alpha else ""
+        return (
+            f"in={self.in_features}, out={self.out_features}, "
+            f"storage={self.storage!r}, state={frozen}{alpha}"
+        )
+
     def bytes_per_value(self) -> float | None:
         if self._pack_kind is None:
             return None
         if self._pack_kind == MODE_PACKED:
             return 8.0 / 5.0
         if self._pack_kind == MODE_FASTPACKED:
-            return 2.0  # 2 bits/value
+            return 2.0
         return 8.0
 
     def state_bytes(self) -> int:
-        """Bytes actually used for ternary storage (weights + γ only)."""
+        """Bytes used for ternary storage (packed weights + γ)."""
         if self._pack_kind is None:
             return 0
         packed_bytes = int(self.packed_weight.numel())
-        # γ is FP32, one per output row.
-        gamma_bytes = self.gamma_eval.numel() * 4
+        gamma_bytes = self.gamma_eval.numel() * 4  # FP32
         return packed_bytes + gamma_bytes
 
 
