@@ -11,10 +11,13 @@ error without adding parameters.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
-from torch import Tensor
+import torch.nn.functional as F
+from torch import Tensor, nn
 
 
 # ---------------------------------------------------------------------------
@@ -174,10 +177,144 @@ def quantize_activations_8bit_forward(x: Tensor, use_hadamard: bool = True) -> T
     return _ActivationQuantFn.apply(x, False)
 
 
+# ---------------------------------------------------------------------------
+# OmniQuant — learnable scale equivalence S
+# ---------------------------------------------------------------------------
+# Apprend une matrice de diagonale d'echelle S telle que :
+#   (X * S^{-1}) x (S * W) = X * W
+# On optimise S pendant la phase de calibration pour minimiser
+# la distance de reconstruction entre le bloc FP16 et le bloc quantise.
+
+class ScaleEquivalence(nn.Module):
+    """Learnable scale equivalence matrix S (OmniQuant-style).
+
+    Optimise un facteur d'echelle diagonal par canal pour minimiser
+    l'erreur de quantification entre la sortie FP16 et la sortie
+    ternaire + 8-bit activations.
+
+    Forward ::
+        x_s = x / scale
+        W_s = scale.unsqueeze(-1) * W
+        y = ternair_linear(x_s, W_s)
+
+    Args:
+        hidden_size: Dimension cachee du modele.
+        init_scale: Valeur d'initialisation de S (1.0 = identite).
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        init_scale: float = 1.0,
+    ) -> None:
+        super().__init__()
+        # Echelle apprise S (diagonale): (hidden_size,)
+        self.log_scale = nn.Parameter(
+            torch.full((hidden_size,), math.log(init_scale))
+        )
+
+    @property
+    def scale(self) -> Tensor:
+        """S = exp(log_scale) — toujours positif."""
+        return torch.exp(self.log_scale)
+
+    def apply_to_weights(self, weight: Tensor) -> Tensor:
+        """Applique S aux poids: W_s = S * W.
+
+        Args:
+            weight: (out_features, in_features)
+        Returns:
+            (out_features, in_features) poids re-echelonnes
+        """
+        # W_s = S * W  →  broadcast S along in_features dim
+        # weight: (out_features, in_features), scale: (in_features,)
+        return weight * self.scale.unsqueeze(0)
+
+    def apply_to_activations(self, x: Tensor) -> Tensor:
+        """Applique S^{-1} aux activations: x_s = x / S.
+
+        Args:
+            x: (..., hidden_size)
+        Returns:
+            (..., hidden_size) activations re-echelonnees
+        """
+        return x / self.scale
+
+    def forward(self, x: Tensor, weight: Tensor) -> Tensor:
+        """Applique l'echelle equivalente S.
+
+        Retourne (x_s, W_s) tels que x_s @ W_s.T ~= x @ W.T.
+        """
+        return self.apply_to_activations(x), self.apply_to_weights(weight)
+
+
+def calibrate_scale_equivalence(
+    model: nn.Module,
+    calibration_data: Tensor,
+    lr: float = 1e-3,
+    steps: int = 100,
+) -> dict[str, ScaleEquivalence]:
+    """Calibre les echelles S pour chaque couche TernairLinear.
+
+    Minimise l'erreur de reconstruction entre la sortie FP16 et
+    la sortie quantisee (ternaire + 8-bit activations) pour chaque
+    couche, sequentiellement de la premiere a la derniere.
+
+    Args:
+        model: Modele Ternair a calibrer.
+        calibration_data: (batch, seq_len, hidden_size) tenseur de calibration.
+        lr: Taux d'apprentissage pour l'optimisation de S.
+        steps: Nombre d'etapes de calibration par couche.
+
+    Returns:
+        dict {module_name: ScaleEquivalence} pour chaque couche.
+    """
+    from ternair.quantization.linear import TernairLinear
+    from ternair.quantization.ternary import ternary_linear_forward
+
+    scales = {}
+
+    for name, module in model.named_modules():
+        if not isinstance(module, TernairLinear):
+            continue
+
+        scale_equi = ScaleEquivalence(module.in_features).to(
+            calibration_data.device
+        )
+        optimizer = torch.optim.AdamW(scale_equi.parameters(), lr=lr)
+
+        x = calibration_data.clone().detach()
+        w = module.weight.data.clone().detach()
+
+        for _ in range(steps):
+            # Forward FP16 (reference)
+            y_ref = F.linear(x, w)
+
+            # Forward avec echelle equivalente
+            x_s, w_s = scale_equi(x, w)
+            gamma = _compute_gamma(w_s, dim=-1)
+            y_q = ternary_linear_forward(w_s, gamma)
+            y_q = F.linear(x_s, y_q)
+
+            # MSE loss
+            loss = F.mse_loss(y_q, y_ref)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        scales[name] = scale_equi
+        print(f"  Calibre {name}: scale={scale_equi.scale.mean().item():.4f}")
+
+    return scales
+
+
 __all__ = [
     "Activation8Bit",
     "apply_hadamard_transform",
     "apply_inverse_hadamard",
     "quantize_activations_8bit",
     "quantize_activations_8bit_forward",
+    "ScaleEquivalence",
+    "calibrate_scale_equivalence",
 ]

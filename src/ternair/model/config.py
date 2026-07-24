@@ -33,6 +33,12 @@ class TernairConfig:
     thalamus_k: int = 32
     thalamus_heads: int = 4
     thalamus_dim: int = -1  # -1 → same as hidden_size
+    # MoE configuration
+    num_experts: int = 1  # 1 = desactive (pas de MoE)
+    top_k_experts: int = 1
+    moe_layer_period: int = 0  # 0 = desactive
+    # KV-Cache quantifie (BitAttention)
+    kv_cache_bits: int = 0  # 0 = pas de quant KV, 2 = 2-bit, 4 = 4-bit
     # rope scaling could be added here if we want to extend prototypes
     extra: dict = field(default_factory=dict)
 

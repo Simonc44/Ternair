@@ -8,6 +8,113 @@ import os
 import sys
 
 
+def test_bitdelta_lora():
+    """Test T-LoRA / BitDelta adapters."""
+    import torch
+    from ternair.quantization.bitdelta import (
+        TernaryLoRALinear, TernaryDeltaLinear,
+        AdapterRegistry, add_lora_to_model, add_bitdelta_to_model
+    )
+
+    # Test TernaryLoRALinear forward
+    lora = TernaryLoRALinear(64, 128, rank=8)
+    x = torch.randn(2, 16, 64)
+    out = lora(x)
+    assert out.shape == (2, 16, 128), f"LoRA shape: {out.shape}"
+    print(f"  LoRA: {sum(p.numel() for p in lora.parameters())} params")
+
+    # Test TernaryDeltaLinear forward
+    delta = TernaryDeltaLinear(64, 128)
+    out = delta(x)
+    assert out.shape == (2, 16, 128), f"Delta shape: {out.shape}"
+
+    # Test Registry
+    import torch.nn as nn
+    model = nn.Linear(64, 128)
+    registry = AdapterRegistry()
+    lora2 = TernaryLoRALinear(64, 128, rank=4)
+    registry.register("test", lora2)
+    registry.attach(model)
+    out = model(x)
+    assert out.shape == (2, 16, 128), f"Registry shape: {out.shape}"
+    registry.detach()
+
+    print("  [PASS] T-LoRA / BitDelta tests passed")
+
+
+def test_omni_quant():
+    """Test ScaleEquivalence (OmniQuant)."""
+    import torch
+    from ternair.quantization.activation import ScaleEquivalence
+
+    scale = ScaleEquivalence(256)
+    x = torch.randn(2, 16, 256)
+    w = torch.randn(128, 256)
+    x_s, w_s = scale(x, w)
+    assert x_s.shape == x.shape, f"x_s shape: {x_s.shape}"
+    assert w_s.shape == w.shape, f"w_s shape: {w_s.shape}"
+    print(f"  ScaleEquivalence: scale.mean={scale.scale.mean().item():.4f}")
+    print("  [PASS] OmniQuant tests passed")
+
+
+def test_kv_cache():
+    """Test KV-Cache quantization (BitAttention)."""
+    import torch
+    from ternair.model.attention import _quantize_kv
+
+    k = torch.randn(1, 4, 64, 128)
+    k_q = _quantize_kv(k, bits=2)
+    assert k_q.shape == k.shape, f"KV quant shape: {k_q.shape}"
+    error = (k - k_q).abs().mean().item()
+    print(f"  KV quant 2-bit error: {error:.4f}")
+
+    from ternair.model.config import TernairConfig
+    cfg = TernairConfig(hidden_size=256, num_hidden_layers=2,
+                         num_attention_heads=4, num_key_value_heads=4,
+                         kv_cache_bits=2)
+    assert cfg.kv_cache_bits == 2
+    print("  [PASS] BitAttention tests passed")
+
+
+def test_moe():
+    """Test Ternary MoE."""
+    import torch
+    from ternair.model.moe import TernaryMoEBlock
+    from ternair.model.config import TernairConfig
+
+    cfg = TernairConfig(hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4,
+                         num_key_value_heads=4, storage="fastpacked")
+    moe = TernaryMoEBlock(cfg, num_experts=4, top_k=2,
+                          hidden_size=128, intermediate_size=256)
+    x = torch.randn(2, 8, 128)
+    out = moe(x)
+    assert out.shape == x.shape, f"MoE shape: {out.shape}"
+    print(f"  MoE: {sum(p.numel() for p in moe.parameters()):,} params")
+    print("  [PASS] Ternary MoE tests passed")
+
+
+def test_webgpu():
+    """Test WebGPU backend kernel generation."""
+    from ternair.kernels.webternair import (
+        generate_wgsl_ternary_matmul,
+        generate_wgsl_rms_norm,
+        validate_webgpu_kernels,
+    )
+
+    wgsl = generate_wgsl_ternary_matmul()
+    assert "@compute" in wgsl
+    assert "decode_byte" in wgsl
+
+    rms = generate_wgsl_rms_norm()
+    assert "RMSNorm" in rms or "rms" in rms.lower()
+
+    results = validate_webgpu_kernels()
+    assert all(results.values()), f"WGSL validation: {results}"
+    print(f"  WebGPU shaders valides: {sum(1 for v in results.values() if v)}/{len(results)}")
+    print("  [PASS] WebGPU backend tests passed")
+
+
 def test_generation():
     """Test advanced generation: greedy, sampling, streaming, chat templates."""
     import torch
@@ -130,10 +237,15 @@ def test_eval():
 
 
 def main():
-    print("=== CI Advanced Tests ===")
+    print("=== CI Advanced Tests v0.3.0 ===")
     test_generation()
     test_export()
     test_eval()
+    test_bitdelta_lora()
+    test_omni_quant()
+    test_kv_cache()
+    test_moe()
+    test_webgpu()
     print("=== All CI advanced tests passed ===")
     return 0
 
