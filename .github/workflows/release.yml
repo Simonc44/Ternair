@@ -35,13 +35,53 @@ jobs:
       - name: Generate release notes
         id: release_notes
         run: |
-          NOTES="## Ternair v${{ steps.get_version.outputs.version }}
-
-          Installation depuis GitHub :
+          VERSION=${{ steps.get_version.outputs.version }}
+          
+          # Build dynamic changelog based on version
+          if [ "$VERSION" = "0.2.0" ]; then
+            NOTES="# Ternair v$VERSION
+          
+          ## Fonctionnalites
+          
+          ### Export SafeTensors compatible HuggingFace
+          - Export des poids ternaires compactes au format model.safetensors
+          - Generation automatique de config.json pour le Hub HuggingFace
+          - Rapport de compression (FP16 vs ternaire) avec print_compression_report()
+          - 13.56x de compression moyenne
+            
+          ### Generation avancee
+          - Repetition penalty (repetition_penalty=1.1)
+          - Streaming token par token (generate_stream)
+          - Templates de chat ChatML et Llama-3 (format_chat_prompt)
+            
+          ### Suite d'evaluation
+          - Perplexite sur WikiText-2 et C4 (fenetre glissante)
+          - Zero-shot sur HellaSwag, ARC-Challenge, MMLU
+          - Benchmark de vitesse (tokens/sec) et memoire
+          - Rapport structure (EvalReport) exportable en JSON
+            
+          ### Runtime C++ autonome
+          - Header-only C++17, zero dependance externe
+          - Charge les fichiers .safetensors exportes par Ternair
+          - Forward pass complete : Embed -> RMSNorm -> HybridBlock x N
+          - API C compatible (ternair_create, ternair_load, ternair_generate)
+          - SIMD backends: AVX-512 / ARM NEON + fallback scalaire
+            
+          ## Installation
           \`\`\`bash
-          pip install git+https://github.com/Simonc44/Ternair.git@v${{ steps.get_version.outputs.version }}
+          pip install git+https://github.com/Simonc44/Ternair.git@v$VERSION
           \`\`\`
           "
+          else
+            NOTES="# Ternair v$VERSION
+          
+          Installation depuis GitHub :
+          \`\`\`bash
+          pip install git+https://github.com/Simonc44/Ternair.git@v$VERSION
+          \`\`\`
+          "
+          fi
+          
           echo "notes<<EOF" >> $GITHUB_OUTPUT
           echo "$NOTES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
