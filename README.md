@@ -6,7 +6,7 @@
 
 # Ternair
 
-**BitNet b1.58 -- Reseaux de neurones ternaires a l'echelle 1 Gio**
+**BitNet b1.58 -- Reseaux de neurones ternaires a l'echelle 1 Go**
 
 ---
 
