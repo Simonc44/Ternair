@@ -1,75 +1,66 @@
-<p align="center">
-  <h1 align="center">⚡ Ternair</h1>
-  <p align="center"><strong>BitNet b1.58 — Ternary Neural Networks at 1 GiB Scale</strong></p>
-</p>
+# Ternair
 
-<p align="center">
-  <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-blue">
-  <img alt="PyTorch" src="https://img.shields.io/badge/pytorch-2.4%2B-orange">
-  <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-green">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-52/52-green">
-</p>
+**BitNet b1.58 -- Reseaux de neurones ternaires a l'echelle 1 Gio**
 
 ---
 
-**Ternair** is a production-grade implementation of **BitNet b1.58** — a neural network architecture where every weight is constrained to `{-1, 0, +1}` (ternary values, ~1.58 bits). This enables:
+Ternair est une implementation de production de **BitNet b1.58**, une architecture de reseau de neurones dans laquelle chaque poids est contraint a `{-1, 0, +1}` (valeurs ternaires, ~1,58 bits). Cette approche permet :
 
-- **~16× memory compression** vs FP16 (942 MiB for a 4B-parameter model)
-- **ADD/SUB-only arithmetic** — zero float multiplications during inference
-- **No KV-cache** when using the optional SSM layers (`O(1)` generation memory)
-- **K-WTA token compression** via the ThalamicBottleneck (32 fixed latents per sequence)
+- Compression memoire ~16x par rapport au FP16 (942 Mio pour un modele de 4 milliards de parametres)
+- Arithmetique par additions et soustractions uniquement -- zero multiplication flottante durant l'inference
+- Absence de cache KV lors de l'utilisation des couches SSM optionnelles (memoire de generation en O(1))
+- Compression de tokens K-WTA via le goulot thalamique (ThalamicBottleneck) : 32 latents fixes par sequence
 
-## ✨ Features
+## Fonctionnalites
 
-| Feature | Status |
-|---------|--------|
-| **Ternary quantization** (STE, γ-scaling, 3 values) | ✅ |
-| **Packing**: base-3 (1.6 b/v) or 2-bit (2.0 b/v) | ✅ |
-| **GPU kernel** (Triton — decode in JIT loop) | ✅ |
-| **CPU kernel** (C++ SIMD — AVX-512 / ARM NEON) | ✅ |
-| **Causal LM** (GQA attention, RoPE, SquaredReLU MLP) | ✅ |
-| **ThalamicBottleneck** (K-WTA compression, K=32) | ✅ |
-| **SSM block** (Mamba-style recurrence, O(1) memory) | ✅ |
-| **WSD scheduler** (Warmup-Stable-Decay) | ✅ |
-| **Decoupled optimizer** (ternary WD=0, emb WD=0.1) | ✅ |
-| **Accelerate training pipeline** | ✅ |
-| **1 GiB size projection** (942 MiB, 4.07B params) | ✅ |
-| **52 unit tests** | ✅ |
+| Fonctionnalite | Statut |
+|----------------|--------|
+| Quantification ternaire (STE, echelle gamma, 3 valeurs) | Disponible |
+| Conditionnement : base-3 (1,6 b/v) ou 2 bits (2,0 b/v) | Disponible |
+| Noyau GPU (Triton -- decodage en boucle JIT) | Disponible |
+| Noyau CPU (C++ SIMD -- AVX-512 / ARM NEON) | Disponible |
+| Modele causal LM (attention GQA, RoPE, MLP SquaredReLU) | Disponible |
+| ThalamicBottleneck (compression K-WTA, K=32) | Disponible |
+| Bloc SSM (recurrence style Mamba, memoire O(1)) | Disponible |
+| Planificateur WSD (Warmup-Stable-Decay) | Disponible |
+| Optimiseur decouple (WD=0 pour ternaire, WD=0,1 pour embedding) | Disponible |
+| Pipeline d'entrainement Accelere | Disponible |
+| Projection de taille 1 Gio (942 Mio, 4,07 milliards de parametres) | Disponible |
 
-## 🚀 Quick start
+## Demarrage rapide
 
 ```bash
-# Create environment
-uv venv .venv
+# Creer l'environnement
+python3 -m venv .venv
 source .venv/bin/activate
 
-# Install ternair
-uv pip install -e src/ternair[torch]
+# Installer ternair
+pip install -e src/ternair
 
-# Show default configuration
+# Afficher la configuration par defaut
 python -m ternair info
 
-# Project size for 1 GiB target
+# Projection de taille pour la cible 1 Gio
 python -m ternair size --profile one_gb
 
-# Run a tiny demo model
+# Executer un petit modele de demonstration
 python -m ternair demo --profile tiny
 
-# Run all tests
+# Lancer tous les tests
 python -m pytest tests/ --confcutdir=tests
 ```
 
-## 🏋️ Training
+## Entrainement
 
 ```bash
-# Smoke test (20 steps, tiny model, 2M params)
+# Test de fumee (20 pas, modele tiny, 2 millions de parametres)
 accelerate launch scripts/train.py --config scripts/train_tiny.yaml
 
-# Full 1 GiB training (60 layers, 2560 hidden, 4B params)
+# Entrainement complet a 1 Gio (60 couches, 2560 dimensions cachees, 4 milliards de parametres)
 accelerate launch scripts/train.py --config scripts/train_one_gb.yaml
 ```
 
-## 🧠 Architecture
+## Architecture
 
 ```
 TernairConfig:
@@ -78,80 +69,81 @@ TernairConfig:
   ├── intermediate_size=5120, max_position_embeddings=2048
   ├── storage: "packed" | "fastpacked" | "int8"
   │
-  ├── ThalamicBottleneck (optional)
-  │   └── K-WTA: top-32 tokens → cross-attention → 32 latents
+  ├── ThalamicBottleneck (optionnel)
+  │   └── K-WTA: top-32 tokens -> cross-attention -> 32 latents
   │
-  ├── TernairHybridBlock × num_hidden_layers
-  │   ├── Attention (GQA + RoPE)          — first `num_attn_layers`
-  │   └── TernarySSM (Mamba-style scan)   — remaining layers
+  ├── TernairHybridBlock x num_hidden_layers
+  │   ├── Attention (GQA + RoPE)          -- premieres couches `num_attn_layers`
+  │   └── TernarySSM (scan style Mamba)   -- couches restantes
   │
   └── TernairForCausalLM
-      ├── TernairEmbedding (tied weights)
-      ├── TernairModel (hybrid blocks)
-      └── TernairLMHead (tied)
+      ├── TernairEmbedding (poids lies)
+      ├── TernairModel (blocs hybrides)
+      └── TernairLMHead (lie)
 ```
 
-## ⚡ How it works
+## Fonctionnement
 
-### Ternary quantization
+### Quantification ternaire
 
-Every weight matrix `W` is quantized per-row:
+Chaque matrice de poids `W` est quantifiee par ligne :
 
 ```
-γ = mean(|W|)                     # per-row scale
-W_norm = W / γ
-W_t = round(clamp(W_norm, -1, 1)) # → {-1, 0, +1}
+gamma = mean(|W|)                     # echelle par ligne
+W_norm = W / gamma
+W_t = round(clamp(W_norm, -1, 1))    # -> {-1, 0, +1}
 ```
 
-**Forward**: `y = (γ · W_t) ⊗ x` → reduces to ADD/SUB of activations.
-**Backward**: Straight-Through Estimator (STE) — gradient flows through `round` as identity.
+**Propagation avant** : `y = (gamma * W_t) (x)` -> se reduit a des additions et soustractions d'activations.
 
-### Fast packing (2-bit)
+**Retropropagation** : Straight-Through Estimator (STE) -- le gradient traverse `round` comme une identite.
 
-Each trit `{-1, 0, +1}` is stored as 2 bits in a `uint8` byte (4 trits/byte):
+### Conditionnement rapide (2 bits)
+
+Chaque trit `{-1, 0, +1}` est stocke sur 2 bits dans un octet `uint8` (4 trits/octet) :
 
 ```python
-# Decode: no modulo, no lookup, no branching
-trit = (bits & 1) - ((bits >> 1) & 1)  # → {-1, 0, +1}
+# Decodage : sans modulo, sans table de correspondance, sans branchement
+trit = (bits & 1) - ((bits >> 1) & 1)  # -> {-1, 0, +1}
 ```
 
-### SSD memory projection
+### Projection memoire SSD
 
-| Component | Size (1 GiB profile) |
-|-----------|---------------------|
-| Ternary weights (packed) | 776.2 MiB |
-| Embedding + LM head (tied) | 160.0 MiB |
-| γ scales | 5.1 MiB |
-| RMSNorm + misc buffers | 0.6 MiB |
-| **Total** | **941.9 MiB (< 1 GiB)** |
+| Composant | Taille (profil 1 Gio) |
+|-----------|-----------------------|
+| Poids ternaires (conditionnes) | 776,2 Mio |
+| Embedding + tete LM (lies) | 160,0 Mio |
+| Echelles gamma | 5,1 Mio |
+| RMSNorm + tampons divers | 0,6 Mio |
+| **Total** | **941,9 Mio (< 1 Gio)** |
 
-## 📂 Project structure
+## Structure du projet
 
 ```
 src/ternair/
-├── quantization/     # STE, packing, TernairLinear
-├── kernels/          # Triton GPU, C++ SIMD, numpy ref
-├── model/            # Config, attention, MLP, SSM, thalamus, generation
-├── training/         # WSD scheduler, optimizer, trainer
-├── benchmark/        # Size projection
-├── cli.py            # CLI entry point
-└── README.md         # Full documentation (FR/EN)
+├── quantization/     # STE, conditionnement, TernairLinear
+├── kernels/          # Triton GPU, C++ SIMD, reference numpy
+├── model/            # Configuration, attention, MLP, SSM, thalamus, generation
+├── training/         # Planificateur WSD, optimiseur, entraineur
+├── benchmark/        # Projection de taille
+├── cli.py            # Point d'entree CLI
+└── README.md         # Documentation complete
 
 scripts/
-├── train.py          # accelerate entry point
-├── train_tiny.yaml   # Smoke config
-└── train_one_gb.yaml # 1 GiB config
+├── train.py          # Point d'entree accelerate
+├── train_tiny.yaml   # Configuration de test
+└── train_one_gb.yaml # Configuration 1 Gio
 ```
 
-## 📊 Performance
+## Performances
 
-- **4.07 billion ternary parameters** stored in **942 MiB**
-- **ADD/SUB-only matmul** — zero FP multiplications at inference
-- **O(1) memory for generation** (SSM mode — no KV-cache)
-- **K-WTA compression**: any input length → 32 fixed latents
+- 4,07 milliards de parametres ternaires stockes dans 942 Mio
+- Multiplication matricielle par additions et soustractions uniquement -- zero multiplication FP en inference
+- Memoire O(1) pour la generation (mode SSM -- sans cache KV)
+- Compression K-WTA : toute longueur d'entree -> 32 latents fixes
 
-## 📄 License
+## Licence
 
 Apache 2.0
 
-Built on the BitNet b1.58 research by Microsoft Research (2024).
+Construit sur les travaux de recherche BitNet b1.58 de Microsoft Research (2024).
