@@ -3,7 +3,7 @@
 from ternair.model.config import TernairConfig
 from ternair.model.modeling import TernairModel, TernairForCausalLM
 from ternair.model.attention import TernairAttention
-from ternair.model.mlp import SquaredReLU, TernairMLP
+from ternair.model.mlp import TernairMLP
 from ternair.model.block import RMSNorm, TernairBlock
 from ternair.model.ssm import TernarySSMBlock
 from ternair.model.thalamus import ThalamicBottleneck
@@ -16,7 +16,6 @@ __all__ = [
     "TernairModel",
     "TernairForCausalLM",
     "TernairAttention",
-    "SquaredReLU",
     "TernairMLP",
     "RMSNorm",
     "TernairBlock",

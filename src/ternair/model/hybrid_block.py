@@ -33,13 +33,36 @@ class TernairHybridBlock(nn.Module):
         the SSM block.
     layer_idx
         The layer index in the transformer stack.
+
+    Notes
+    -----
+    La distribution des couches suit un pattern periodique defini par
+    ``attn_layer_period`` (par defaut: 4 = 3x SSM + 1x Attention).
+    
+    Pattern 3:1 (SSM x 3, Attention x 1) :
+      - Layer 0 : SSM
+      - Layer 1 : SSM
+      - Layer 2 : SSM
+      - Layer 3 : Attention
+      - Layer 4 : SSM
+      - ...
     """
 
     def __init__(self, config: TernairConfig, layer_idx: int) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        attn_layers = getattr(config, "num_attn_layers", config.num_hidden_layers)
-        self.is_attn = layer_idx < attn_layers
+        
+        # Mode de dispatch : soit periodique, soit legacy (num_attn_layers)
+        period = getattr(config, "attn_layer_period", 0)
+        
+        if period > 1 and config.num_attn_layers < config.num_hidden_layers:
+            # Pattern periodique : SSM x (period-1) puis Attention
+            # La couche est attention si (layer_idx+1) % period == 0
+            self.is_attn = ((layer_idx + 1) % period == 0)
+        else:
+            # Legacy : les premieres num_attn_layers couches sont attention
+            attn_layers = getattr(config, "num_attn_layers", config.num_hidden_layers)
+            self.is_attn = layer_idx < attn_layers
 
         if self.is_attn:
             self.block = TernairBlock(config, layer_idx)

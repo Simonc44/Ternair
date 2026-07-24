@@ -26,6 +26,7 @@ class TernairConfig:
     storage: str = "packed"  # one of: "int8", "packed", "fastpacked"
     # Hybrid architecture (SSM + attention)
     num_attn_layers: int = -1  # -1 → all layers are attention (legacy mode)
+    attn_layer_period: int = 4  # Pattern: SSM x (period-1) + Attention (ex: 4 = SSM-SSM-SSM-Attn)
     ssm_dim: int = 16
     ssm_dt_rank: str | int = "auto"
     # Thalamic bottleneck
@@ -38,7 +39,12 @@ class TernairConfig:
     def __post_init__(self) -> None:
         # Valeurs par defaut conditionnelles
         if self.num_attn_layers < 0:
-            self.num_attn_layers = self.num_hidden_layers
+            if self.attn_layer_period > 0:
+                # Pattern periodique: [SSM x (period-1), Attn] x N
+                # Nombre de couches d'attention = ceil(num_layers / period)
+                self.num_attn_layers = (self.num_hidden_layers + self.attn_layer_period - 1) // self.attn_layer_period
+            else:
+                self.num_attn_layers = self.num_hidden_layers
         if self.thalamus_dim < 0:
             self.thalamus_dim = self.hidden_size
 
@@ -49,6 +55,8 @@ class TernairConfig:
             raise ValueError("num_attention_heads must be a multiple of num_key_value_heads")
         if self.storage not in ("int8", "packed", "fastpacked"):
             raise ValueError(f"Unsupported storage mode {self.storage!r}")
+        if self.attn_layer_period < 1:
+            raise ValueError(f"attn_layer_period must be >= 1, got {self.attn_layer_period}")
 
     @property
     def head_dim(self) -> int:

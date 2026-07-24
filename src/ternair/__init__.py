@@ -40,7 +40,6 @@ from ternair.quantization import (
 )
 from ternair.model import (
     RMSNorm,
-    SquaredReLU,
     TernairAttention,
     TernairBlock,
     TernairConfig,
@@ -78,7 +77,6 @@ __all__ = [
     "unpack_trits",
     # model
     "RMSNorm",
-    "SquaredReLU",
     "TernairAttention",
     "TernairBlock",
     "TernairConfig",
