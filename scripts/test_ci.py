@@ -115,6 +115,47 @@ def test_webgpu():
     print("  [PASS] WebGPU backend tests passed")
 
 
+def test_gguf_export():
+    """Test GGUF export module."""
+    import os
+    import numpy as np
+    from ternair.kernels.gguf_export import export_to_gguf
+
+    # Small test: export a dict of tensors
+    tensors = {
+        "test.weight": np.random.randn(64, 64).astype(np.float32),
+        "test.bias": np.random.randn(64).astype(np.float32),
+    }
+    config = {"hidden_size": 64, "num_hidden_layers": 2,
+              "num_attention_heads": 4, "num_key_value_heads": 2,
+              "intermediate_size": 128, "vocab_size": 1000,
+              "max_position_embeddings": 512}
+
+    path = export_to_gguf(tensors, "/tmp/test.gguf", config=config)
+    assert os.path.exists(path), "GGUF file not created"
+    size = os.path.getsize(path)
+    assert size > 0, f"GGUF file empty: {size}"
+    print(f"  GGUF export: {size / 1024:.1f} KiB")
+    print("  [PASS] GGUF export tests passed")
+
+
+def test_triton_fused():
+    """Test enhanced Triton fused kernels (module load)."""
+    from ternair.kernels.triton_matmul_fused import (
+        has_triton, benchmark_triton_vs_numpy
+    )
+    if has_triton():
+        print("  Triton disponible")
+        # Only run benchmark on GPU
+        import torch
+        if torch.cuda.is_available():
+            results = benchmark_triton_vs_numpy(M=512, N=512, batch=1, num_warmup=1, num_runs=2)
+            print(f"  Speedup: {results.get('speedup', 'N/A')}x")
+    else:
+        print("  Triton non disponible (skip)")
+    print("  [PASS] Triton fused module tests passed")
+
+
 def test_generation():
     """Test advanced generation: greedy, sampling, streaming, chat templates."""
     import torch
@@ -237,7 +278,7 @@ def test_eval():
 
 
 def main():
-    print("=== CI Advanced Tests v0.3.0 ===")
+    print("=== CI Advanced Tests v0.4.0 ===")
     test_generation()
     test_export()
     test_eval()
@@ -246,6 +287,8 @@ def main():
     test_kv_cache()
     test_moe()
     test_webgpu()
+    test_gguf_export()
+    test_triton_fused()
     print("=== All CI advanced tests passed ===")
     return 0
 
