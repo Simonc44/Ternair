@@ -1,0 +1,43 @@
+# Ternair pre-training config -- tiny profile (smoke test)
+model_profile: "tiny"
+model_storage: "packed"
+
+# AdamW
+optimizer: "adamw"
+learning_rate: 3.0e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+epsilon: 1.0e-8
+max_grad_norm: 1.0
+
+# WSD scheduler
+warmup_ratio: 0.05   # 5% of steps
+stable_ratio: 0.80   # 80% of steps
+decay_ratio: 0.15    # 15% of steps
+min_lr_ratio: 0.0
+decay_type: "cosine"
+
+# Data (uses HuggingFace datasets; set `dataset_streaming: false` for local cache)
+dataset_name: "HuggingFaceFW/fineweb-edu"
+dataset_subset: "sample-100BT"
+dataset_streaming: true
+dataset_max_samples: 1000
+dataset_cache_dir: "~/.cache/huggingface/datasets"
+tokenizer_name: "gpt2"
+
+# Training loop
+batch_size: 2
+gradient_accumulation_steps: 4
+max_train_steps: 20
+seq_length: 128
+eval_every: 10
+eval_steps: 2
+save_every: 50
+save_total_limit: 2
+output_dir: "checkpoints/tiny_smoke"
+log_every: 1
+report_to: "none"
+
+# Reproducibility
+seed: 42

@@ -1,0 +1,44 @@
+"""Ternary decoder block."""
+
+from __future__ import annotations
+
+import torch
+from torch import Tensor, nn
+
+from ternair.model.attention import TernairAttention, _build_rope_cache
+from ternair.model.config import TernairConfig
+from ternair.model.mlp import TernairMLP
+from ternair.quantization.activation import quantize_activations_8bit_forward
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-5) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
+        var = x.float().pow(2).mean(dim=-1, keepdim=True)
+        x = x.float() * torch.rsqrt(var + self.eps)
+        return (x * self.weight).to(x.dtype)
+
+
+class TernairBlock(nn.Module):
+    def __init__(self, config: TernairConfig, layer_idx: int) -> None:
+        super().__init__()
+        self.ln_1 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.attn = TernairAttention(config)
+        self.ln_2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = TernairMLP(config)
+        self.layer_idx = layer_idx
+
+    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:  # type: ignore[override]
+        x_norm = self.ln_1(x)
+        x = x + self.attn(x_norm, cos, sin)
+        x_norm = self.ln_2(x)
+        x = x + self.mlp(x_norm)
+        return x
+
+
+__all__ = ["TernairBlock", "RMSNorm"]
+_ = _build_rope_cache  # re-export convenience

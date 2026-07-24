@@ -1,0 +1,44 @@
+# Ternair pre-training config -- one_gb profile (≈ 942 MiB packed)
+# Adjust batch_size and gradient_accumulation_steps for your GPU memory.
+model_profile: "one_gb"
+model_storage: "packed"
+
+# Training hyper-parameters for BitNet b1.58 on ~4B ternary params
+optimizer: "adamw"
+learning_rate: 1.5e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+epsilon: 1.0e-8
+max_grad_norm: 1.0
+
+# WSD scheduler (10 B tokens total at bs=256)
+warmup_ratio: 0.01    # 100 M tokens
+stable_ratio: 0.84    # 8.4 B tokens
+decay_ratio: 0.15     # 1.5 B tokens
+min_lr_ratio: 0.0
+decay_type: "cosine"
+
+# Data
+dataset_name: "HuggingFaceFW/fineweb-edu"
+dataset_subset: "sample-100BT"
+dataset_streaming: true
+dataset_max_samples: -1     # all
+dataset_cache_dir: "~/.cache/huggingface/datasets"
+tokenizer_name: "gpt2"
+
+# Training loop
+batch_size: 4
+gradient_accumulation_steps: 64   # effective bs = 4 * 64 = 256
+max_train_steps: 40_000
+seq_length: 1024
+eval_every: 500
+eval_steps: 20
+save_every: 2000
+save_total_limit: 5
+output_dir: "checkpoints/ternair_one_gb"
+log_every: 10
+report_to: "none"
+
+# Reproducibility
+seed: 42
