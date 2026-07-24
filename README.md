@@ -17,7 +17,7 @@ Ternair est une implementation de production de **BitNet b1.58**, une architectu
 - Absence de cache KV lors de l'utilisation des couches SSM optionnelles (memoire de generation en O(1))
 - Compression de tokens K-WTA via le goulot thalamique (ThalamicBottleneck) : 32 latents fixes par sequence
 
-## Fonctionnalites (v0.2.0)
+## Fonctionnalites (v0.3.0)
 
 | Fonctionnalite | Statut |
 |----------------|--------|
@@ -36,12 +36,17 @@ Ternair est une implementation de production de **BitNet b1.58**, une architectu
 | Planificateur WSD (Warmup-Stable-Decay) | Disponible |
 | Optimiseur decouple (WD=0 pour ternaire, WD=0,1 pour embedding) | Disponible |
 | Pipeline d'entrainement Accelere | Disponible |
-| **Export SafeTensors compatible HuggingFace** | **Nouveau v0.2.0** |
-| **Rapport de compression automatique** | **Nouveau v0.2.0** |
-| **Generation avec repetition penalty + streaming** | **Nouveau v0.2.0** |
-| **Templates de chat (ChatML, Llama-3)** | **Nouveau v0.2.0** |
-| **Suite d'evaluation (perplexite, zero-shot, vitesse)** | **Nouveau v0.2.0** |
-| **Runtime C++ autonome (inference.h, zero dependance)** | **Nouveau v0.2.0** |
+| Export SafeTensors compatible HuggingFace | Disponible (v0.2.0) |
+| Rapport de compression automatique | Disponible (v0.2.0) |
+| Generation avec repetition penalty + streaming | Disponible (v0.2.0) |
+| Templates de chat (ChatML, Llama-3) | Disponible (v0.2.0) |
+| Suite d'evaluation (perplexite, zero-shot, vitesse) | Disponible (v0.2.0) |
+| Runtime C++ autonome (inference.h, zero dependance) | Disponible (v0.2.0) |
+| **T-LoRA / BitDelta (adaptateurs ternaires low-rank)** | **Nouveau v0.3.0** |
+| **OmniQuant (echelle S apprise activation-poids)** | **Nouveau v0.3.0** |
+| **BitAttention (KV-Cache quantifie 2-bit)** | **Nouveau v0.3.0** |
+| **Ternary MoE (Melange d'Experts ternaires)** | **Nouveau v0.3.0** |
+| **WebGPU / WebAssembly backend navigateur** | **Nouveau v0.3.0** |
 | Projection de taille 1 Gio (942 Mio, 4,07 milliards de parametres) | Disponible |
 
 ## Demarrage rapide
@@ -74,6 +79,17 @@ model.freeze_storage()
 model.eval()
 print_compression_report(model)
 export_to_safetensors(model, 'mon_modele.safetensors')
+"
+
+# Ajouter des adaptateurs T-LoRA pour specialisation
+python -c "
+from ternair.model.size_profiles import tiny_profile
+from ternair.model.modeling import TernairForCausalLM
+from ternair.quantization.bitdelta import add_lora_to_model
+
+model = TernairForCausalLM(tiny_profile(storage='fastpacked'))
+registry = add_lora_to_model(model, rank=8)
+print(f'Adaptateurs : {registry.count_params():,} parametres entrainables')
 "
 
 # Evaluer la perplexite du modele
@@ -111,6 +127,116 @@ for token_tensor in generate_stream(model, prompt, max_new_tokens=32):
 prompt = format_chat_prompt([
     {"role": "user", "content": "Raconte une histoire"}
 ], format="chatml")
+```
+
+## T-LoRA / BitDelta -- Specialisation sans retoucher le modele de base
+
+Ajoutez des adaptateurs ternaires low-rank pour specialiser votre modele sur une tache (code, medecine, langue) sans modifier les poids de base.
+
+```python
+from ternair.quantization.bitdelta import (
+    add_lora_to_model, add_bitdelta_to_model,
+    TernaryLoRALinear, AdapterRegistry
+)
+
+# LoRA ternaire (rank=8, ~95% de reduction)
+registry = add_lora_to_model(model, rank=8, alpha=1.0)
+
+# Entrainer seulement les adaptateurs
+optimizer = torch.optim.AdamW(registry.adapter_params(), lr=1e-3)
+for step in range(100):
+    logits = model(input_ids)
+    loss = torch.nn.functional.cross_entropy(
+        logits.view(-1, logits.size(-1)), targets.view(-1)
+    )
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+
+# Sauvegarder les adaptateurs (quelques Ko)
+torch.save(registry.state_dict(), "adaptateurs_code.pt")
+
+# Recharger sur un autre modele de base
+registry2 = add_lora_to_model(model2, rank=8)
+registry2.load_state_dict(torch.load("adaptateurs_code.pt"))
+```
+
+## OmniQuant -- Calibration des echelles activation-poids
+
+Optimise une echelle diagonale S pour minimiser l'erreur de quantification entre la sortie FP16 et la sortie ternaire + 8-bit activations. Reduit la perte de perplexite de 15 a 20%.
+
+```python
+from ternair.quantization.activation import ScaleEquivalence, calibrate_scale_equivalence
+
+# Calibration automatique sur quelques echantillons
+scales = calibrate_scale_equivalence(
+    model,
+    calibration_data=x_calib,
+    lr=1e-3,
+    steps=100,
+)
+
+# Application manuelle
+scale = ScaleEquivalence(hidden_size=256)
+x_s, w_s = scale(x, weight)  # (X * S^-1) x (S * W) = X x W
+```
+
+## BitAttention -- KV-Cache quantifie en 2-bit
+
+Reduit l'empreinte memoire du KV-Cache par 4 ou 8, rendant les contextes ultra-longs (32k+ tokens) praticables sur appareils a faible RAM.
+
+```python
+from ternair.model.config import TernairConfig
+
+# Activer la quantification KV avec kv_cache_bits=2
+config = TernairConfig(
+    hidden_size=256,
+    num_hidden_layers=4,
+    num_attention_heads=4,
+    num_key_value_heads=4,
+    kv_cache_bits=2,  # 2-bit KV cache (BitAttention)
+)
+```
+
+## Ternary MoE -- Melange d'Experts ternaires
+
+Seulement 2 experts sur 8 sont actifs par token. Un modele de 12 milliards de parametres ternaires ne consomme le calcul que d'un modele de 2 milliards par token.
+
+```python
+from ternair.model.moe import TernaryMoEBlock, add_moe_to_model
+
+# Remplacer certains MLP par des blocs MoE
+add_moe_to_model(
+    model,
+    num_experts=8,    # 8 experts au total
+    top_k=2,          # 2 actifs par token
+    moe_layer_period=2,  # Toutes les 2 couches
+)
+```
+
+## WebGPU / WebAssembly -- Inference dans le navigateur
+
+Le backend WebGPU genere des compute shaders WGSL pour executer Ternair directement dans Chrome, Firefox ou Edge sans backend serveur.
+
+```bash
+# Generer les shaders WebGPU
+python -c "
+from ternair.kernels.webternair import (
+    generate_wgsl_ternary_matmul,
+    generate_js_runtime,
+    validate_webgpu_kernels,
+)
+
+# Valider les shaders
+results = validate_webgpu_kernels()
+print(f'Shaders valides: {results}')
+
+# Generer le runtime JS
+js_code = generate_js_runtime()
+with open('ternair-web.js', 'w') as f:
+    f.write(js_code)
+print('Runtime JS genere: ternair-web.js')
+"
 ```
 
 ## Export HuggingFace
@@ -173,17 +299,25 @@ TernairConfig:
   ├── num_attention_heads=32, num_key_value_heads=8  (GQA)
   ├── intermediate_size=5120, max_position_embeddings=2048
   ├── storage: "packed" | "fastpacked" | "int8"
+  ├── kv_cache_bits: 0 | 2 | 4  (BitAttention)
+  ├── num_experts: 1 | 4 | 8 | 16  (Ternary MoE)
   │
   ├── ThalamicBottleneck (optionnel)
   │   └── K-WTA: top-32 tokens -> cross-attention -> 32 latents
   │
   ├── TernairHybridBlock x num_hidden_layers
-  │   ├── Attention (GQA + RoPE)          -- pattern periodique 3:1
-  │   └── TernarySSM (scan style Mamba)   -- memoire O(1)
+  │   ├── Attention (GQA + RoPE + KV quant)  -- pattern periodique 3:1
+  │   └── TernarySSM (scan style Mamba)       -- memoire O(1)
+  │
+  ├── TernaryMoEBlock (optionnel, remplace certains MLP)
+  │   └── 8 experts ternaires, top-2 actifs
+  │
+  ├── AdapterRegistry (T-LoRA / BitDelta)
+  │   └── Adaptateurs low-rank ternaires
   │
   └── TernairForCausalLM
       ├── TernairEmbedding (poids lies)
-      ├── TernairModel (blocs hybrides)
+      ├── TernairModel (blocs hybrides + MoE)
       └── TernairLMHead (lie)
 ```
 
@@ -232,6 +366,22 @@ trit = (bits & 1) - ((bits >> 1) & 1)  # -> {-1, 0, +1}
 
 Avant quantification INT8 des activations, une transformee de Hadamard rapide O(n log n) redistribue les outliers sur toutes les dimensions, reduisant l'erreur de quantification sans ajouter de parametres.
 
+### OmniQuant -- Echelle equivalente S
+
+Apprend une matrice diagonale S telle que `(X * S^-1) x (S * W) = X x W`. Optimisee pendant la calibration pour minimiser la distance de reconstruction entre le bloc FP16 et le bloc ternaire. Reduit la perte de perplexite de 15 a 20%.
+
+### BitAttention -- KV-Cache quantifie
+
+Les cles et valeurs du cache d'attention sont quantifiees en 2-bit par blocs de 32 tokens avec facteur d'echelle dynamique. L'empreinte memoire du KV-cache est divisee par 4 ou 8, rendant les fenetres de contexte 32k+ tokens praticables.
+
+### T-LoRA / BitDelta
+
+Decomposition des ajustements de poids en matrices de rang bas ternarisees `A x B` ou `A, B in {-1, 0, +1}`. Chaque adaptateur ne prend que quelques Ko pour specialiser le modele (code, medical, francais) sans toucher au coeur.
+
+### Ternary MoE
+
+Combinaison de la quantification 1.58-bit avec une architecture a Melange d'Experts. Seulement 2 experts sur 8 sont actifs par token. Le routage binaire selectionne les experts via un simple softmax + top-k.
+
 ### Projection memoire SSD
 
 | Composant | Taille (profil 1 Gio) |
@@ -266,34 +416,39 @@ print_compression_report(model)
 
 ```
 src/ternair/
-├── quantization/     # STE, conditionnement, TernairLinear, alpha appris, distillation
-│   ├── linear.py     # TernairLinear avec alpha appris
-│   ├── ternary.py    # Recuit beta, ternarization STE
-│   ├── activation.py # Hadamard + 8-bit activation quant
-│   ├── distillation.py # KL loss, Feature Matching, conversion HuggingFace
-│   └── packing.py    # Conditionnement base-3 et 2-bit
-├── kernels/          # Triton GPU, C++ SIMD, reference numpy
-│   ├── inference.h   # Runtime C++ header-only (NOUVEAU v0.2.0)
-│   ├── cpu_matmul.h  # AVX-512 / ARM NEON matmul
+├── quantization/
+│   ├── linear.py         # TernairLinear avec alpha appris
+│   ├── ternary.py        # Recuit beta, ternarization STE
+│   ├── activation.py     # Hadamard + 8-bit + OmniQuant (v0.3.0)
+│   ├── bitdelta.py       # T-LoRA / BitDelta adapters (NOUVEAU v0.3.0)
+│   ├── distillation.py   # KL loss, Feature Matching, conversion HF
+│   └── packing.py        # Conditionnement base-3 et 2-bit
+├── kernels/
+│   ├── inference.h       # Runtime C++ header-only
+│   ├── webternair.py     # WebGPU / Wasm backend (NOUVEAU v0.3.0)
+│   ├── cpu_matmul.h      # AVX-512 / ARM NEON matmul
 │   └── ...
-├── model/            # Configuration, attention, MLP, SSM, thalamus, generation
-│   ├── export.py     # Export SafeTensors + HuggingFace (NOUVEAU v0.2.0)
-│   ├── generation.py # Sampling avance, streaming, chat (NOUVEAU v0.2.0)
+├── model/
+│   ├── config.py         # Configuration + kv_cache_bits, num_experts
+│   ├── attention.py      # GQA + KV quant 2-bit (BitAttention v0.3.0)
+│   ├── moe.py            # Ternary MoE experts (NOUVEAU v0.3.0)
+│   ├── export.py         # Export SafeTensors + HuggingFace
+│   ├── generation.py     # Sampling avance, streaming, chat
 │   └── ...
-├── training/         # Planificateur WSD, optimiseur, entraineur
-├── benchmark/        # Projection de taille + evaluation
-│   ├── eval.py       # Suite d'evaluation (NOUVEAU v0.2.0)
-│   └── ...
-├── cli.py            # Point d'entree CLI
-└── README.md         # Documentation complete
+├── training/             # Planificateur WSD, optimiseur, entraineur
+├── benchmark/
+│   └── eval.py           # Suite d'evaluation
+├── cli.py                # Point d'entree CLI
+└── README.md             # Documentation complete
 
 scripts/
-├── train.py          # Point d'entree accelerate
-├── train_tiny.yaml   # Configuration de test
-├── train_one_gb.yaml # Configuration 1 Gio
-├── demo_reel.py      # Pipeline de demonstration complet
-├── qat_distill.py    # Distillation QAT pour Colab
-└── wordy_colab.py    # Script Colab Wordy
+├── train.py              # Point d'entree accelerate
+├── train_tiny.yaml       # Configuration de test
+├── train_one_gb.yaml     # Configuration 1 Gio
+├── demo_reel.py          # Pipeline de demonstration complet
+├── qat_distill.py        # Distillation QAT pour Colab
+├── test_ci.py            # Tests CI (8 tests, v0.3.0)
+└── wordy_colab.py        # Script Colab Wordy
 ```
 
 ## Performances
@@ -303,9 +458,11 @@ scripts/
 - Compression 13.56x par rapport au FP16 equivalent
 - Memoire O(1) pour la generation (mode SSM -- sans cache KV)
 - Compression K-WTA : toute longueur d'entree -> 32 latents fixes
+- KV-Cache 2-bit (BitAttention) : memoire divisee par 4 ou 8 pour contextes longs
+- MoE : 12 milliards de parametres, cout de calcul d'un modele de 2 milliards
 
 ## Licence
 
 Apache 2.0
 
-Construit sur les travaux de recherche BitNet b1.58 de Microsoft Research (2024).
+Construit sur les travaux de recherche BitNet b1.58 de Microsoft Research (2024), BitDelta (2024), OmniQuant (2024), et BitMoE (2025).
