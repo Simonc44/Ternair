@@ -115,16 +115,24 @@ def _selective_scan_parallel(
     #
     # h[t] = exp(log_A_cumsum[t]) * cumsum_s<=t( exp(-log_A_cumsum[s]) * dBx[s] )
     #
-    # Numerical note: subtract the running max before exp for stability.
-    decay_term = torch.exp(log_A_cumsum)                    # (B, L, D, N)
-    anti_decay = torch.exp(-log_A_cumsum)                   # (B, L, D, N)
+    # Numerical note: A is negative and << 0, so log_A_bar is large and
+    # negative, meaning log_A_cumsum diverges to -inf for moderate L
+    # (|A| ~ 16, L ~ 12 -> |log_A_cumsum| ~ 192).  Computing exp(-log_A_cumsum)
+    # in float32 (max ~88 * ln2 ~ 60) overflows to +inf, which then turns
+    # the hidden states into NaN as soon as accumulation starts growing.
+    # We promote the cumsum / exp / cumsum chain to float64, where exp()
+    # has headroom up to ~709, then cast back to ``dtype`` for the rest
+    # of the model.
+    log_A_cumsum_safe = log_A_cumsum.to(torch.float64)
+    decay_term = torch.exp(log_A_cumsum_safe)               # (B, L, D, N)
+    anti_decay = torch.exp(-log_A_cumsum_safe)              # (B, L, D, N)
 
     # Weighted cumsum: (B, L, D, N)
-    weighted_dBx = anti_decay * dBx
+    weighted_dBx = anti_decay * dBx.to(torch.float64)
     weighted_cumsum = torch.cumsum(weighted_dBx, dim=1)     # (B, L, D, N)
 
     # Hidden states: h[t] = decay[t] * weighted_cumsum[t]
-    h = decay_term * weighted_cumsum                        # (B, L, D, N)
+    h = (decay_term * weighted_cumsum).to(dtype)             # (B, L, D, N)
 
     # Output: y[t] = (C[t] * h[t]).sum(N) + D * x[t]
     # C: (B, L, N) → (B, L, 1, N)
