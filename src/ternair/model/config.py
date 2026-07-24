@@ -36,12 +36,13 @@ class TernairConfig:
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # Valeurs par defaut conditionnelles
         if self.num_attn_layers < 0:
             self.num_attn_layers = self.num_hidden_layers
         if self.thalamus_dim < 0:
             self.thalamus_dim = self.hidden_size
 
-    def __post_init__(self) -> None:
+        # Validations
         if self.hidden_size % self.num_attention_heads != 0:
             raise ValueError("hidden_size must be a multiple of num_attention_heads")
         if self.num_attention_heads % self.num_key_value_heads != 0:

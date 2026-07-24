@@ -114,7 +114,7 @@ class TernairForCausalLM(nn.Module):
         from ternair.quantization.linear import TernairLinear
 
         total = 0
-        for module in self.named_modules():
+        for _name, module in self.named_modules():
             if isinstance(module, TernairLinear):
                 total += module.out_features * module.in_features
         if include_embedding:
