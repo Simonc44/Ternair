@@ -3,38 +3,38 @@
     "profile": "tiny",
     "storage": "fastpacked",
     "steps": 300,
-    "seq_len": 128,
+    "seq_len": 64,
     "device": "cpu",
-    "date": "2026-07-25T09:59:05"
+    "date": "2026-07-25T19:43:28"
   },
   "models": {
     "Ternair (ternary)": {
-      "perplexity": NaN,
-      "num_tokens": 39742,
-      "size_mib": 0.67,
-      "tokens_per_sec": 1.69,
+      "perplexity": 485165195.4098,
+      "num_tokens": 23,
+      "size_mib": 25.21,
+      "tokens_per_sec": 95.59,
       "params": 15609440
     },
     "FP16 baseline": {
-      "perplexity": 15352762.5493,
-      "num_tokens": 39742,
-      "size_mib": 36.61,
-      "tokens_per_sec": 52.92,
-      "params": 19192064
+      "perplexity": 485165195.4098,
+      "num_tokens": 29870,
+      "size_mib": 75.18,
+      "tokens_per_sec": 2182.68,
+      "params": 19708672
     },
     "ternair": {
-      "perplexity": NaN,
-      "num_tokens": 39742,
-      "size_mib": 0.67,
-      "tokens_per_sec": 1.69,
+      "perplexity": 485165195.4098,
+      "num_tokens": 23,
+      "size_mib": 25.21,
+      "tokens_per_sec": 95.59,
       "params": 15609440
     },
     "fp16": {
-      "perplexity": 15352762.5493,
-      "num_tokens": 39742,
-      "size_mib": 36.61,
-      "tokens_per_sec": 52.92,
-      "params": 19192064
+      "perplexity": 485165195.4098,
+      "num_tokens": 29870,
+      "size_mib": 75.18,
+      "tokens_per_sec": 2182.68,
+      "params": 19708672
     }
   }
 }
