@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       steps:
-        description: "Training steps (default: 300)"
+        description: "Training steps"
         required: false
-        default: "300"
+        default: "500"
       profile:
         description: "Model profile: tiny | small"
         required: false
@@ -39,11 +39,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-          pip install datasets transformers
+          pip install datasets
 
       - name: Run WikiText-2 benchmark
         env:
-          STEPS: ${{ github.event.inputs.steps || '300' }}
+          STEPS: ${{ github.event.inputs.steps || '500' }}
           PROFILE: ${{ github.event.inputs.profile || 'tiny' }}
         run: |
           python scripts/benchmark_wikitext2.py \
@@ -51,12 +51,13 @@ jobs:
             --profile "$PROFILE" \
             --storage fastpacked \
             --device cpu \
-            --seq-len 64 \
+            --seq-len 128 \
             --batch-size 4 \
-            --lr 2e-4 \
+            --lr 3e-4 \
             --warmup-ratio 0.1 \
-            --eval-max-tokens 15000 \
+            --eval-max-tokens 20000 \
             --speed-seq-len 64 \
+            --use-char-tokenizer \
             --output benchmark_results.json \
             --output-md benchmark_results.md
 
