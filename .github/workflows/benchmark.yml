@@ -33,8 +33,7 @@ jobs:
           cache: "pip"
 
       - name: Install PyTorch CPU
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install Ternair and benchmark dependencies
         run: |
@@ -52,10 +51,12 @@ jobs:
             --profile "$PROFILE" \
             --storage fastpacked \
             --device cpu \
-            --seq-len 128 \
-            --batch-size 2 \
-            --eval-max-tokens 20000 \
-            --speed-tokens 16 \
+            --seq-len 64 \
+            --batch-size 4 \
+            --lr 2e-4 \
+            --warmup-ratio 0.1 \
+            --eval-max-tokens 15000 \
+            --speed-seq-len 64 \
             --output benchmark_results.json \
             --output-md benchmark_results.md
 
