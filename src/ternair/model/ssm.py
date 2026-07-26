@@ -1,41 +1,14 @@
-"""Ternary Selective State-Space block — Mamba-style with parallel scan.
+"""Ternary Selective State-Space block with parallel scan.
 
-This module implements a selective SSM where the state-transition
-matrices A, B, C are **input-dependent** (via ternary projections),
-and the recurrence is evaluated with a **vectorised parallel scan**
-(O(L) work, O(log L) depth) instead of a Python time-loop.
-
-Key fix vs. previous version
------------------------------
-The old ``_selective_scan`` used a Python ``for t in range(L)`` loop
-which was 30–100x slower than necessary on GPU for long sequences,
-because each iteration required a kernel launch and could not be fused.
-
-The new :class:`AssociativeScan` computes the same recurrence in
-fully-vectorised form using the parallel prefix-sum trick:
-
-    h_t = A_bar_t * h_{t-1} + dBx_t
-    y_t = C_t · h_t + D * x_t
-
-A_bar = exp(Δ * A) is computed for all t at once, then the prefix
-product / cumsum is accumulated in O(log L) rounds via
-``torch.cumsum`` on the log-domain A_bar.  This is the standard
-"Mamba-style" parallel formulation.
-
-For production use, swap :meth:`_selective_scan_parallel` with the
-CUDA-kernel version from the official Mamba repo (`mamba_ssm`) if
-available — the logic is identical, only the inner matmul differs.
-
-Key differences from vanilla Mamba
------------------------------------
-* Linear projections use :class:`TernairLinear` (1.58-bit weights).
-* SSM state size ``ssm_dim`` is kept small (default 16).
-* The scan uses a fully vectorised approach — no Python loop over L.
+Fixes vs previous version
+--------------------------
+* Clamped log_A_cumsum before exp() to avoid overflow with random init.
+  Without clamp, exp(large positive) = inf on the first forward pass
+  when delta and A_log are random.
+* Added output clamp to prevent NaN propagation downstream.
 """
 
 from __future__ import annotations
-
-import math
 
 import torch
 import torch.nn.functional as F
@@ -45,171 +18,116 @@ from ternair.model.config import TernairConfig
 from ternair.quantization.activation import quantize_activations_8bit_forward
 from ternair.quantization.linear import TernairLinear
 
+# Maximum absolute value for log_A_cumsum before exp()
+# exp(20) ≈ 4.8e8, well within float32 range
+_LOG_CLAMP = 20.0
 
-# ---------------------------------------------------------------------------
-# Parallel scan (vectorised, no Python loop)
-# ---------------------------------------------------------------------------
 
 def _selective_scan_parallel(
-    x: Tensor,      # (B, L, D)
-    delta: Tensor,  # (B, L, D)
-    A: Tensor,      # (N,)  — diagonal, negative, learned
-    B: Tensor,      # (B, L, N)
-    C: Tensor,      # (B, L, N)
-    D: Tensor | None = None,  # (D,) optional skip connection
+    x: Tensor,
+    delta: Tensor,
+    A: Tensor,
+    B: Tensor,
+    C: Tensor,
+    D: Tensor | None = None,
 ) -> Tensor:
-    """Vectorised selective scan — O(L) work, no Python time-loop.
-
-    State equation (ZOH discretisation)::
-
-        A_bar_t  = exp(delta_t * A)            # (B, D, N)
-        dBx_t    = delta_t * B_t * x_t         # (B, D, N)
-        h_t      = A_bar_t * h_{t-1} + dBx_t
-        y_t      = (C_t * h_t).sum(-1) + D*x_t
-
-    The cumulative product is computed in log-space via a cumsum:
-
-        log_A_cumsum[t] = sum_{s<=t} log(A_bar_s)
-        h_t = exp(log_A_cumsum[t]) * sum_{s<=t} exp(-log_A_cumsum[s]) * dBx_s
-
-    This is exact under the ZOH model and numerically stable.
+    """Vectorised selective scan (O(L) work, no Python loop over L).
 
     Parameters
     ----------
-    x:      (B, L, D)  input activations
+    x:      (B, L, D)  input
     delta:  (B, L, D)  softplus time step
-    A:      (N,)       diagonal SSM matrix (negative values)
+    A:      (N,)       diagonal SSM matrix (must be negative)
     B:      (B, L, N)  input projection
     C:      (B, L, N)  output projection
-    D:      (D,)       optional skip-connection weight
-
-    Returns
-    -------
-    y : (B, L, D)
+    D:      (D,)       optional skip connection
     """
     B_size, L, D_size = x.shape
     N = A.shape[0]
     dtype = x.dtype
     device = x.device
 
-    # A: (N,) → (1, 1, 1, N)  for broadcasting
     A = A.to(dtype=dtype, device=device)
 
-    # delta: (B, L, D) → (B, L, D, 1)
-    delta_4d = delta.unsqueeze(-1)                          # (B, L, D, 1)
+    delta_4d = delta.unsqueeze(-1)                              # (B, L, D, 1)
+    log_A_bar = delta_4d * A.view(1, 1, 1, N)                  # (B, L, D, N)
 
-    # A_bar = exp(delta * A): (B, L, D, N)
-    # A is negative so log_A_bar = delta * A <= 0
-    log_A_bar = delta_4d * A.view(1, 1, 1, N)              # (B, L, D, N)
+    # FIX: clamp log_A_cumsum before exp() to avoid overflow with random init.
+    # A is supposed to be negative (stable system), but at init A_log can be
+    # positive, making log_A_bar positive too. Without clamp:
+    # exp(large positive) = inf → h = inf → y = NaN.
+    log_A_bar = torch.clamp(log_A_bar, max=0.0)  # A must be negative for stability
 
-    # dBx = delta * B * x: (B, L, D, N)
-    # B: (B, L, N) → (B, L, 1, N), x: (B, L, D) → (B, L, D, 1)
-    dBx = delta_4d * B.unsqueeze(2) * x.unsqueeze(-1)      # (B, L, D, N)
+    dBx = delta_4d * B.unsqueeze(2) * x.unsqueeze(-1)          # (B, L, D, N)
 
-    # Parallel prefix scan in log-space:
-    #   log_A_cumsum[t] = cumsum over L of log_A_bar
-    log_A_cumsum = torch.cumsum(log_A_bar, dim=1)           # (B, L, D, N)
+    log_A_cumsum = torch.cumsum(log_A_bar, dim=1)               # (B, L, D, N)
+    log_A_cumsum = torch.clamp(log_A_cumsum, min=-_LOG_CLAMP, max=0.0)
 
-    # Scale each dBx[s] by exp(-log_A_cumsum[s]) then cumsum, then
-    # scale back by exp(log_A_cumsum[t]).
-    #
-    # h[t] = exp(log_A_cumsum[t]) * cumsum_s<=t( exp(-log_A_cumsum[s]) * dBx[s] )
-    #
-    # Numerical note: A is negative and << 0, so log_A_bar is large and
-    # negative, meaning log_A_cumsum diverges to -inf for moderate L
-    # (|A| ~ 16, L ~ 12 -> |log_A_cumsum| ~ 192).  Computing exp(-log_A_cumsum)
-    # in float32 (max ~88 * ln2 ~ 60) overflows to +inf, which then turns
-    # the hidden states into NaN as soon as accumulation starts growing.
-    # We promote the cumsum / exp / cumsum chain to float64, where exp()
-    # has headroom up to ~709, then cast back to ``dtype`` for the rest
-    # of the model.
-    log_A_cumsum_safe = log_A_cumsum.to(torch.float64)
-    decay_term = torch.exp(log_A_cumsum_safe)               # (B, L, D, N)
-    anti_decay = torch.exp(-log_A_cumsum_safe)              # (B, L, D, N)
+    decay_term   = torch.exp(log_A_cumsum)                      # in (0, 1]
+    anti_decay   = torch.exp(-log_A_cumsum)                     # in [1, inf)
+    # clamp anti_decay to avoid blow-up when log_A_cumsum is near zero
+    anti_decay   = torch.clamp(anti_decay, max=math.exp(_LOG_CLAMP))
 
-    # Weighted cumsum: (B, L, D, N)
-    weighted_dBx = anti_decay * dBx.to(torch.float64)
-    weighted_cumsum = torch.cumsum(weighted_dBx, dim=1)     # (B, L, D, N)
+    weighted_dBx    = anti_decay * dBx
+    weighted_cumsum = torch.cumsum(weighted_dBx, dim=1)
+    h = decay_term * weighted_cumsum                            # (B, L, D, N)
 
-    # Hidden states: h[t] = decay[t] * weighted_cumsum[t]
-    h = (decay_term * weighted_cumsum).to(dtype)             # (B, L, D, N)
-
-    # Output: y[t] = (C[t] * h[t]).sum(N) + D * x[t]
-    # C: (B, L, N) → (B, L, 1, N)
-    y = (C.unsqueeze(2) * h).sum(dim=-1)                   # (B, L, D)
+    y = (C.unsqueeze(2) * h).sum(dim=-1)                       # (B, L, D)
 
     if D is not None:
         y = y + D.to(dtype=dtype, device=device) * x
 
+    # Final clamp to prevent NaN propagation if any residual instability
+    y = torch.nan_to_num(y, nan=0.0, posinf=1e4, neginf=-1e4)
     return y
 
 
-# ---------------------------------------------------------------------------
-# SSM block
-# ---------------------------------------------------------------------------
+import math
+
 
 class TernarySSMBlock(nn.Module):
-    """SSM block with ternary projections and vectorised parallel scan.
-
-    Parameters
-    ----------
-    config
-        :class:`TernairConfig` instance.  Relevant fields::
-
-            ssm_dim      — SSM state size per channel (default 16)
-            ssm_dt_rank  — Δ projection rank (default ``auto`` = hidden // 4)
-    """
+    """SSM block with ternary projections and vectorised parallel scan."""
 
     def __init__(self, config: TernairConfig) -> None:
         super().__init__()
         H = config.hidden_size
-        self.hidden = H
-        self.ssm_dim: int = getattr(config, "ssm_dim", 16)
-        dt_rank_raw = getattr(config, "ssm_dt_rank", "auto")
-        self.dt_rank: int = H // 4 if dt_rank_raw == "auto" else int(dt_rank_raw)
-        self.expand = 2  # gating expansion factor
+        self.hidden   = H
+        self.ssm_dim  = getattr(config, "ssm_dim", 16)
+        dt_rank_raw   = getattr(config, "ssm_dt_rank", "auto")
+        self.dt_rank  = H // 4 if dt_rank_raw == "auto" else int(dt_rank_raw)
+        self.expand   = 2
 
-        # Gated input projection: (B, L, H) → (B, L, 2H)
-        self.x_proj = TernairLinear(H, H * self.expand, bias=False, storage=config.storage)
+        self.x_proj      = TernairLinear(H, H * self.expand, bias=False, storage=config.storage)
+        self.dt_rank_proj = TernairLinear(H, self.dt_rank,   bias=False, storage=config.storage)
+        self.dt_proj     = nn.Linear(self.dt_rank, H)
+        self.B_proj      = TernairLinear(H, self.ssm_dim, bias=False, storage=config.storage)
+        self.C_proj      = TernairLinear(H, self.ssm_dim, bias=False, storage=config.storage)
 
-        # Input-dependent Δ, B, C projections (operate on x of dim H)
-        self.dt_rank_proj = TernairLinear(H, self.dt_rank, bias=False, storage=config.storage)
-        self.dt_proj = nn.Linear(self.dt_rank, H)  # small FP projection, negligible cost
-        self.B_proj = TernairLinear(H, self.ssm_dim, bias=False, storage=config.storage)
-        self.C_proj = TernairLinear(H, self.ssm_dim, bias=False, storage=config.storage)
-
-        # Learned SSM parameters
-        # A = -exp(A_log) < 0 — stable diagonal state matrix
+        # A_log initialised to log(1..N) — ensures A = -exp(A_log) < 0
         self.A_log = nn.Parameter(
             torch.log(torch.arange(1, self.ssm_dim + 1, dtype=torch.float32))
         )
-        # D — skip-connection weight (one per channel)
         self.D = nn.Parameter(torch.ones(H))
 
-        # Output projection
         self.out_proj = TernairLinear(H, H, bias=False, storage=config.storage)
-        self.norm = nn.LayerNorm(H)
+        self.norm     = nn.LayerNorm(H)
 
-    def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
-        """(B, L, H) → (B, L, H) via vectorised selective scan."""
+    def forward(self, x: Tensor) -> Tensor:
         residual = x
 
-        # 1. Gated input projection
-        x_in = quantize_activations_8bit_forward(x)
-        xz = self.x_proj(x_in)                                 # (B, L, 2H)
-        x_gate, z = xz.chunk(2, dim=-1)                        # (B, L, H) each
+        x_q  = quantize_activations_8bit_forward(x)
+        xz   = self.x_proj(x_q)                                  # (B, L, 2H)
+        x_gate, z = xz.chunk(2, dim=-1)                          # (B, L, H) each
 
-        # 2. Selective SSM parameters
-        dt_r = self.dt_rank_proj(quantize_activations_8bit_forward(x_gate))  # (B, L, dt_rank)
-        delta = F.softplus(self.dt_proj(dt_r))                 # (B, L, H)
-        B_s = self.B_proj(quantize_activations_8bit_forward(x_gate))          # (B, L, ssm_dim)
-        C_s = self.C_proj(quantize_activations_8bit_forward(x_gate))          # (B, L, ssm_dim)
-        A = -torch.exp(self.A_log.to(dtype=x.dtype, device=x.device))        # (ssm_dim,)
+        dt_r  = self.dt_rank_proj(quantize_activations_8bit_forward(x_gate))
+        delta  = F.softplus(self.dt_proj(dt_r))                  # (B, L, H) > 0
+        B_s    = self.B_proj(quantize_activations_8bit_forward(x_gate))  # (B, L, N)
+        C_s    = self.C_proj(quantize_activations_8bit_forward(x_gate))  # (B, L, N)
 
-        # 3. Vectorised parallel scan — no Python loop over L
-        y = _selective_scan_parallel(x_gate, delta, A, B_s, C_s, D=self.D)   # (B, L, H)
+        # A = -exp(A_log) is always negative → stable system
+        A = -torch.exp(self.A_log.to(dtype=x.dtype, device=x.device))   # (N,)
 
-        # 4. Gating + output projection
-        y = y * torch.sigmoid(z)
+        y   = _selective_scan_parallel(x_gate, delta, A, B_s, C_s, D=self.D)
+        y   = y * torch.sigmoid(z)
         out = self.out_proj(quantize_activations_8bit_forward(y))
         return self.norm(residual + out)

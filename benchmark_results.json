@@ -1,0 +1,41 @@
+{
+  "config": {
+    "profile": "tiny",
+    "storage": "fastpacked",
+    "steps": 500,
+    "seq_len": 128,
+    "device": "cpu",
+    "tokenizer": "char-256",
+    "date": "2026-07-26T06:17:38"
+  },
+  "models": {
+    "Ternair (ternary)": {
+      "perplexity": 24.5506,
+      "num_tokens": 39870,
+      "size_mib": 0.79,
+      "tokens_per_sec": 2012.51,
+      "params": 2809184
+    },
+    "FP16 baseline": {
+      "perplexity": 23.3923,
+      "num_tokens": 39870,
+      "size_mib": 26.35,
+      "tokens_per_sec": 6508.47,
+      "params": 6908416
+    },
+    "ternair": {
+      "perplexity": 24.5506,
+      "num_tokens": 39870,
+      "size_mib": 0.79,
+      "tokens_per_sec": 2012.51,
+      "params": 2809184
+    },
+    "fp16": {
+      "perplexity": 23.3923,
+      "num_tokens": 39870,
+      "size_mib": 26.35,
+      "tokens_per_sec": 6508.47,
+      "params": 6908416
+    }
+  }
+}
