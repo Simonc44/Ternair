@@ -43,12 +43,15 @@ import gc
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 
 _LOGGER = logging.getLogger(__name__)
+
+InferenceBackend = Literal["auto", "torch", "triton", "numpy"]
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +164,21 @@ class TernaryLinearFast(nn.Module):
 
     The packed buffer and per-output alpha are stored as non-trainable
     buffers (``register_buffer``) so the module survives ``.to(device)`` /
-    ``.half()`` without corrupting the binary payload.  Weights are decoded
-    on every forward -- cheap for small layers, sufficient for inference on
-    a frozen model.
+    ``.half()`` without corrupting the binary payload.
+
+    Three forward paths are dispatched at runtime:
+
+    * ``"triton"`` -- fastpacked weights → ``ternair.kernels.triton_fast``
+      GPU kernel (CUDA + triton only).
+    * ``"numpy"``  -- fastpacked weights → ``ternair.kernels.packed_ops``
+      vectorised NumPy matmul (always available).
+    * ``"torch"``  -- pure-Python ``unpack_2bit`` + ``F.linear`` fallback
+      (FP32 accumulator; slower but always works; also the path used when
+      ``in_f % 4 != 0`` since the packed buffer cannot reshape cleanly).
+
+    The ``backend="auto"`` default picks the best path available on the
+    host (triton > numpy > torch).  Use ``set_inference_backend()`` to
+    override per-layer.
 
     Parameters
     ----------
@@ -175,6 +190,8 @@ class TernaryLinearFast(nn.Module):
         Logical dimensions.
     bias
         Optional FP bias of shape ``(out_f,)``.
+    backend
+        Initial inference backend (``"auto" | "torch" | "triton" | "numpy"``).
     """
 
     def __init__(
@@ -184,6 +201,7 @@ class TernaryLinearFast(nn.Module):
         out_f: int,
         in_f: int,
         bias: Optional[Tensor] = None,
+        backend: InferenceBackend = "auto",
     ) -> None:
         super().__init__()
         self.out_f = out_f
@@ -199,8 +217,95 @@ class TernaryLinearFast(nn.Module):
         if bias is not None:
             self.register_buffer("bias_buf", bias.detach().to(torch.float32))
 
+        # Backend dispatch (mirrors TernairLinear.set_inference_backend).
+        if backend not in ("auto", "torch", "triton", "numpy"):
+            raise ValueError(
+                f"Unknown inference backend {backend!r}; expected "
+                "one of ('auto', 'torch', 'triton', 'numpy')"
+            )
+        self.backend: InferenceBackend = backend
+        self._resolved_backend: InferenceBackend | None = None
+
+    # ------------------------------------------------------------------
+    # Backend resolution + dispatch
+    # ------------------------------------------------------------------
+    def set_inference_backend(self, backend: InferenceBackend) -> "TernaryLinearFast":
+        """Force the inference backend used by :meth:`forward`.
+
+        Valid values: ``"auto" | "torch" | "triton" | "numpy"``.
+        """
+        valid = ("auto", "torch", "triton", "numpy")
+        if backend not in valid:
+            raise ValueError(f"Unknown inference backend {backend!r}, expected one of {valid}")
+        self.backend = backend
+        self._resolved_backend = None
+        return self
+
+    def _can_use_kernel_backends(self) -> bool:
+        """True iff the 1-D packed buffer reshapes cleanly to ``(out_f, in_f/4)``."""
+        if self.in_f % 4 != 0:
+            _LOGGER.debug(
+                "TernaryLinearFast: in_f=%d not divisible by 4, kernel path disabled",
+                self.in_f,
+            )
+            return False
+        k_packed = self.in_f // 4
+        return int(self.pw.numel()) == self.out_f * k_packed
+
+    def _resolve_backend(self, x: Tensor) -> InferenceBackend:
+        requested = self.backend
+        if requested != "auto":
+            # Even when explicit, ensure the kernel path is actually
+            # viable (in_f % 4 == 0, buffer reshape clean).  Otherwise
+            # silently fall back to "torch" (with a debug log) instead
+            # of crashing on the reshape at first forward.
+            if requested in ("triton", "numpy") and not self._can_use_kernel_backends():
+                _LOGGER.debug(
+                    "TernaryLinearFast: backend=%r requested but constraints "
+                    "not met (in_f=%d, out_f=%d, pw.numel()=%d) -> fallback to 'torch'",
+                    requested, self.in_f, self.out_f, int(self.pw.numel()),
+                )
+                self._resolved_backend = "torch"
+                return "torch"
+            return requested
+        if self._resolved_backend is not None:
+            return self._resolved_backend
+        if not self._can_use_kernel_backends():
+            self._resolved_backend = "torch"
+            return "torch"
+        backend: InferenceBackend = "torch"
+        if x.is_cuda:
+            try:
+                from ternair.kernels.triton_fast import has_triton
+
+                if has_triton():
+                    backend = "triton"
+            except Exception:
+                pass
+        else:
+            # CPU: prefer the vectorised numpy packed matmul over the
+            # pure-Python unpack + F.linear.
+            try:
+                import numpy  # noqa: F401
+                backend = "numpy"
+            except Exception:
+                pass
+        self._resolved_backend = backend
+        return backend
+
+    # ------------------------------------------------------------------
+    # Forward paths
+    # ------------------------------------------------------------------
     def forward(self, x: Tensor) -> Tensor:
-        # Decode 2-bit -> float32 on the same device as x, scale by alpha.
+        backend = self._resolve_backend(x)
+        if backend == "triton":
+            return self._triton_forward(x)
+        if backend == "numpy":
+            return self._numpy_forward(x)
+        return self._torch_forward(x)
+
+    def _torch_forward(self, x: Tensor) -> Tensor:
+        """Pure-Python fallback (FP32 accumulator). Always works."""
         w = (
             unpack_2bit(self.pw, self.out_f, self.in_f).to(x.device)
             * self.alpha.to(x.device)
@@ -210,8 +315,61 @@ class TernaryLinearFast(nn.Module):
             out = out + self.bias_buf.to(x.device)
         return out.to(x.dtype)
 
+    def _triton_forward(self, x: Tensor) -> Tensor:
+        """``triton_fast`` kernel path (CUDA + fastpacked)."""
+        from ternair.kernels.triton_fast import ternary_matmul_triton
+
+        k_packed = self.in_f // 4
+        packed_2d = self.pw.view(self.out_f, k_packed)
+        x_flat = x.reshape(-1, self.in_f)
+        # alpha is stored as a 0-d scalar; the kernel expects (M,) -- broadcast.
+        gamma = self.alpha.repeat(self.out_f)
+        y = ternary_matmul_triton(
+            packed_2d, x_flat, gamma, device=str(x.device)
+        )
+        if isinstance(y, torch.Tensor):
+            y = y.view(*x.shape[:-1], self.out_f)
+            if self.bias_buf is not None:
+                y = y + self.bias_buf.to(device=y.device, dtype=y.dtype)
+            return y.to(x.dtype)
+        # Kernel fell back to numpy internally.
+        y_t = torch.from_numpy(np.ascontiguousarray(y)).to(
+            device=x.device, dtype=x.dtype
+        )
+        y_t = y_t.view(*x.shape[:-1], self.out_f)
+        if self.bias_buf is not None:
+            y_t = y_t + self.bias_buf.to(device=y_t.device, dtype=y_t.dtype)
+        return y_t
+
+    def _numpy_forward(self, x: Tensor) -> Tensor:
+        """``packed_ops`` NumPy path (vectorised; FP16 accumulator)."""
+        from ternair.kernels.packed_ops import ternary_matmul_numpy_batched
+
+        k_packed = self.in_f // 4
+        packed_2d = self.pw.view(self.out_f, k_packed).cpu().numpy()
+        # alpha is 0-d; broadcast to (M,) for the kernel.
+        gamma_np = self.alpha.repeat(self.out_f).cpu().numpy()
+        x_flat = x.reshape(-1, self.in_f).to(torch.float16).cpu().numpy()
+        squeeze = x_flat.ndim == 1
+        if squeeze:
+            x_flat = x_flat[np.newaxis, :]
+        y_np = ternary_matmul_numpy_batched(packed_2d, x_flat, gamma_np)
+        if squeeze:
+            y_np = y_np.squeeze(0)
+        y_t = torch.from_numpy(np.ascontiguousarray(y_np)).to(
+            device=x.device, dtype=x.dtype
+        )
+        y_t = y_t.view(*x.shape[:-1], self.out_f)
+        if self.bias_buf is not None:
+            y_t = y_t + self.bias_buf.to(device=y_t.device, dtype=y_t.dtype)
+        return y_t
+
     def extra_repr(self) -> str:
-        return f"in={self.in_f}, out={self.out_f}, alpha={self.alpha.item():.4f}"
+        backend = self._resolved_backend or self.backend
+        return (
+            f"in={self.in_f}, out={self.out_f}, alpha={self.alpha.item():.4f}, "
+            f"backend={backend!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +473,7 @@ def load_ternair_model(
     safetensors_name: str = "model_ternair_2bit.safetensors",
     model_class=None,
     dtype: torch.dtype = torch.float16,
+    backend: InferenceBackend = "auto",
 ) -> tuple[nn.Module, Any, LoadReport]:
     """Load a Mistral / LLaMA-architecture ternary model in one call.
 
@@ -447,6 +606,7 @@ def _replace_external(
                     out_f,
                     in_f,
                     bias_t,
+                    backend=backend,
                 ),
             )
         replaced.add(hf_mod)
@@ -497,7 +657,9 @@ def _replace_native(
         setattr(
             parent,
             attr,
-            TernaryLinearFast(tensor, tensors[gamma_key], out_f, in_f),
+            TernaryLinearFast(
+                tensor, tensors[gamma_key], out_f, in_f, backend=backend
+            ),
         )
         replaced.add(hf_mod)
         report.n_ternary_layers += 1
@@ -548,6 +710,7 @@ def _load_fp16_remaining(
 
 __all__ = [
     "TernaryLinearFast",
+    "InferenceBackend",
     "LoadReport",
     "load_ternair_model",
     "llama_to_hf",

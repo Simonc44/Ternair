@@ -13,6 +13,7 @@ from ternair.model.export import export_to_safetensors, export_huggingface_packa
 from ternair.model.size_profiles import tiny_profile, base_profile, one_gb_profile
 from ternair.model.inference import TernairDirectInferencer, BackendName as DirectBackendName
 from ternair.model.loader import (
+    InferenceBackend,
     LoadReport,
     TernaryLinearFast,
     load_ternair_model,
@@ -39,6 +40,7 @@ __all__ = [
     "DirectBackendName",
     "LoadReport",
     "TernaryLinearFast",
+    "InferenceBackend",
     "load_ternair_model",
     "llama_to_hf",
     "unpack_2bit",

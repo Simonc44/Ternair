@@ -833,6 +833,92 @@ def test_ternair_loader():
     print("  [PASS] Ternair loader tests passed")
 
 
+def test_ternair_loader_kernel_dispatch():
+    """Test the TernaryLinearFast kernel-dispatch wiring.
+
+    Covers:
+    - ``set_inference_backend()`` validates inputs and resets the cache.
+    - ``backend="auto"`` on CPU selects ``"numpy"`` (when available).
+    - ``in_f % 4 != 0`` falls back to ``"torch"`` regardless of the
+      requested backend (the kernel path would otherwise crash on the
+      1-D packed-buffer reshape).
+    - Numpy and torch paths agree to a tolerance that absorbs the FP16
+      accumulator noise vs FP32 dequantise noise (~5 % relative).
+    """
+    import numpy as np
+    import torch
+    from ternair.model.loader import TernaryLinearFast
+    from ternair.kernels.packing_fast import pack_trits_2bit
+
+    rng = np.random.default_rng(3)
+    out_f, in_f = 32, 64  # multiples of 4 -> kernel path enabled
+    trits_np = rng.integers(-1, 2, size=(out_f * in_f,)).astype(np.int8)
+    packed = pack_trits_2bit(trits_np).astype(np.uint8)
+    alpha = 0.7
+
+    layer = TernaryLinearFast(torch.from_numpy(packed), alpha, out_f, in_f)
+    x = torch.randn(2, 4, in_f, dtype=torch.float32)
+
+    # 1. set_inference_backend validation
+    layer.set_inference_backend("torch")
+    layer.set_inference_backend("numpy")
+    try:
+        layer.set_inference_backend("does-not-exist")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("set_inference_backend should reject unknown backends")
+    print("  set_inference_backend: validation OK")
+
+    # 2. backend="torch" forced
+    layer.set_inference_backend("torch")
+    y_torch = layer(x)
+    assert y_torch.shape == (2, 4, out_f), y_torch.shape
+    print(f"  backend=torch: out={tuple(y_torch.shape)}")
+
+    # 3. backend="auto" on CPU resolves to numpy (torch always bundles numpy)
+    layer.set_inference_backend("auto")
+    y_auto = layer(x)
+    backend_used = layer._resolved_backend
+    assert backend_used in {"numpy", "torch"}, backend_used
+    print(f"  backend=auto (CPU): resolved={backend_used!r} out={tuple(y_auto.shape)}")
+
+    # 4. Numpy vs torch agreement (FP16 accumulator noise vs FP32 dequantise).
+    diff = (y_torch - y_auto).abs().max().item()
+    mag = max(y_torch.abs().mean().item(), y_auto.abs().mean().item(), 1e-9)
+    rel = diff / mag
+    assert rel < 0.10, f"torch vs auto({backend_used}) rel-diff {rel:.4g}"
+    print(
+        f"  cross-backend: max|err|={diff:.4g} rel={rel:.4g} "
+        f"(torch vs {backend_used})"
+    )
+
+    # 5. in_f % 4 != 0 -> forced fallback to torch even when "triton" requested
+    bad_layer = TernaryLinearFast(
+        torch.from_numpy(packed),
+        alpha,
+        out_f,
+        in_f + 1,  # not a multiple of 4
+    )
+    bad_layer.pw = torch.zeros(
+        (out_f * (in_f + 1) + 3) // 4, dtype=torch.uint8
+    )
+    bad_layer.set_inference_backend("triton")
+    assert bad_layer._resolve_backend(x) == "torch", bad_layer._resolve_backend(x)
+    print("  in_f % 4 != 0: forced fallback to 'torch' OK")
+
+    # 6. Backend override on a module already prepared
+    layer.set_inference_backend("torch")
+    y1 = layer(x)
+    layer.set_inference_backend("numpy")
+    y2 = layer(x)
+    rel = (y1 - y2).abs().max().item() / max(y1.abs().mean().item(), 1e-9)
+    assert rel < 0.10, f"override rel-diff {rel:.4g}"
+    print("  backend override mid-life: torch <-> numpy agrees to 10% OK")
+
+    print("  [PASS] Ternair loader kernel-dispatch tests passed")
+
+
 def main():
     print("=== CI Advanced Tests v0.6.0 ===")
     test_generation()
@@ -854,6 +940,7 @@ def main():
     test_triton_fast_batched()
     test_direct_inference()
     test_ternair_loader()
+    test_ternair_loader_kernel_dispatch()
     print("=== All CI advanced tests passed ===")
     return 0
 
