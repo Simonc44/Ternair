@@ -190,6 +190,9 @@ classees par domaine.
 | **`TernairLinear.set_inference_backend(backend)`** | `quantization/linear.py` | **`auto` / `torch` / `triton` / `cpu_cpp` / `numpy`** | **Nouveau v0.6.0** |
 | **`load_ternair_model(path)` (one-liner)** | `model/loader.py` | **Charge un modele LLaMA/Mistral ternaire depuis SafeTensors** | **Nouveau v0.6.0** |
 | **`TernaryLinearFast` + `unpack_2bit` + `llama_to_hf`** | `model/loader.py` | **Module nn.Linear compatible, decompresse le 2-bit a la volee** | **Nouveau v0.6.0** |
+| **Backend `native` (moteur C++ AVX-512 / AVX-2 / scalar)** | `native/__init__.py` | **ctypes dispatch, CPU only, prioritaire sur numpy** | **Nouveau v0.6.0** |
+| **`from ternair.native import ternary_matmul, NativeEngine, available`** | `native/__init__.py` | **API publique : matmul stateless + end-to-end generate** | **Nouveau v0.6.0** |
+| **CLI `ternair_native --model path --prompt-tokens ...`** | `native/main.cpp` | **Inference bout-en-bout sans Python** | **Nouveau v0.6.0** |
 
 ### Mode d'inference direct
 
@@ -270,7 +273,9 @@ python -m ternair infer  --profile tiny --backend auto  # Mode inference direct
 | `scripts/qat_distill.py` | Distillation QAT HuggingFace |
 | `scripts/colab_distill.py` | Distillation pour Google Colab |
 | `scripts/wordy_colab.py` | Creer Wordy sur Colab |
-| `scripts/test_ci.py` | Tests CI (19 tests v0.6.0 : generation, export, MoE, GGUF, pipeline, memory, packing_base8, triton_fast, direct_inference, ternair_loader) |
+| `src/ternair/native/scripts/build.sh` | Build `libternair_native.so` (g++ only, AVX-512 / AVX-2 / scalar) |
+| `scripts/test_ci.py` | Tests CI (21 tests v0.6.0) |
+| `scripts/native/scripts/build.sh` | Build `libternair_native.so` (g++ only, AVX-512 / AVX-2 / scalar auto) |
 
 ---
 
@@ -278,6 +283,15 @@ python -m ternair infer  --profile tiny --backend auto  # Mode inference direct
 
 ```
 src/ternair/
+├── native/                # Moteur C++ AVX-512 / AVX-2 / scalar (NOUVEAU v0.6.0)
+│   ├── src/               # matmul_avx512.cpp, matmul_avx2.cpp, matmul_scalar.cpp,
+│   │                      #   loader.cpp, runtime.cpp, threadpool.cpp, norm.cpp
+│   ├── include/ternair/   # ternair_runtime.h + ternair_internal.h
+│   ├── __init__.py        # ctypes wrapper (NativeEngine, ternary_matmul)
+│   ├── main.cpp           # CLI `ternair_native --model`
+│   ├── CMakeLists.txt     # Build CMake (optionnel)
+│   ├── scripts/build.sh   # Build g++ pur (auto-detect AVX-512 / AVX-2)
+│   └── tests/             # C++ smoke + Python ctypes roundtrip
 ├── quantization/
 │   ├── linear.py          # TernairLinear avec alpha appris
 │   ├── ternary.py         # STE, ternarisation, recuit beta

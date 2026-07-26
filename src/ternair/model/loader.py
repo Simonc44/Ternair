@@ -51,7 +51,29 @@ from torch import Tensor, nn
 
 _LOGGER = logging.getLogger(__name__)
 
-InferenceBackend = Literal["auto", "torch", "triton", "numpy"]
+InferenceBackend = Literal["auto", "torch", "triton", "numpy", "native"]
+
+
+# ---------------------------------------------------------------------------
+# Native C++ engine detection
+# ---------------------------------------------------------------------------
+
+def _native_engine_available() -> bool:
+    """``True`` iff the native ``libternair_native.so`` is loadable.
+
+    Looks in ``ternair/native/build/`` (g++ build target) and via
+    ``ctypes.util.find_library``.  Cached after the first call so we
+    don't repeatedly hit the filesystem in the hot ``forward()`` loop.
+    """
+    cache_attr = "__dict__"  # placeholder, replaced below with module-level cache
+    # Module-level memoised cache.
+    if "_native_engine_available_cache" not in globals():
+        try:
+            from ternair.native import available as _native_available
+            globals()["_native_engine_available_cache"] = bool(_native_available())
+        except Exception:
+            globals()["_native_engine_available_cache"] = False
+    return globals()["_native_engine_available_cache"]
 
 
 # ---------------------------------------------------------------------------
@@ -218,10 +240,10 @@ class TernaryLinearFast(nn.Module):
             self.register_buffer("bias_buf", bias.detach().to(torch.float32))
 
         # Backend dispatch (mirrors TernairLinear.set_inference_backend).
-        if backend not in ("auto", "torch", "triton", "numpy"):
+        if backend not in ("auto", "torch", "triton", "numpy", "native"):
             raise ValueError(
                 f"Unknown inference backend {backend!r}; expected "
-                "one of ('auto', 'torch', 'triton', 'numpy')"
+                "one of ('auto', 'torch', 'triton', 'numpy', 'native')"
             )
         self.backend: InferenceBackend = backend
         self._resolved_backend: InferenceBackend | None = None
@@ -232,9 +254,9 @@ class TernaryLinearFast(nn.Module):
     def set_inference_backend(self, backend: InferenceBackend) -> "TernaryLinearFast":
         """Force the inference backend used by :meth:`forward`.
 
-        Valid values: ``"auto" | "torch" | "triton" | "numpy"``.
+        Valid values: ``"auto" | "torch" | "triton" | "numpy" | "native"``.
         """
-        valid = ("auto", "torch", "triton", "numpy")
+        valid = ("auto", "torch", "triton", "numpy", "native")
         if backend not in valid:
             raise ValueError(f"Unknown inference backend {backend!r}, expected one of {valid}")
         self.backend = backend
@@ -256,10 +278,10 @@ class TernaryLinearFast(nn.Module):
         requested = self.backend
         if requested != "auto":
             # Even when explicit, ensure the kernel path is actually
-            # viable (in_f % 4 == 0, buffer reshape clean).  Otherwise
-            # silently fall back to "torch" (with a debug log) instead
-            # of crashing on the reshape at first forward.
-            if requested in ("triton", "numpy") and not self._can_use_kernel_backends():
+            # viable (in_f % 4 == 0, buffer reshape clean, .so present).
+            # Otherwise silently fall back to "torch" (with a debug log)
+            # instead of crashing on the reshape at first forward.
+            if requested in ("triton", "numpy", "native") and not self._can_use_kernel_backends():
                 _LOGGER.debug(
                     "TernaryLinearFast: backend=%r requested but constraints "
                     "not met (in_f=%d, out_f=%d, pw.numel()=%d) -> fallback to 'torch'",
@@ -267,6 +289,13 @@ class TernaryLinearFast(nn.Module):
                 )
                 self._resolved_backend = "torch"
                 return "torch"
+            if requested == "native" and not _native_engine_available():
+                _LOGGER.debug(
+                    "TernaryLinearFast: backend='native' requested but "
+                    "libternair_native.so not found -> fallback to 'numpy'",
+                )
+                self._resolved_backend = "numpy"
+                return "numpy"
             return requested
         if self._resolved_backend is not None:
             return self._resolved_backend
@@ -283,13 +312,16 @@ class TernaryLinearFast(nn.Module):
             except Exception:
                 pass
         else:
-            # CPU: prefer the vectorised numpy packed matmul over the
-            # pure-Python unpack + F.linear.
-            try:
-                import numpy  # noqa: F401
-                backend = "numpy"
-            except Exception:
-                pass
+            # CPU: prefer the C++ native engine (AVX-512 / AVX-2).
+            # Fall back to numpy -> torch in that order.
+            if _native_engine_available():
+                backend = "native"
+            else:
+                try:
+                    import numpy  # noqa: F401
+                    backend = "numpy"
+                except Exception:
+                    pass
         self._resolved_backend = backend
         return backend
 
@@ -300,6 +332,8 @@ class TernaryLinearFast(nn.Module):
         backend = self._resolve_backend(x)
         if backend == "triton":
             return self._triton_forward(x)
+        if backend == "native":
+            return self._native_forward(x)
         if backend == "numpy":
             return self._numpy_forward(x)
         return self._torch_forward(x)
@@ -363,6 +397,43 @@ class TernaryLinearFast(nn.Module):
         if self.bias_buf is not None:
             y_t = y_t + self.bias_buf.to(device=y_t.device, dtype=y_t.dtype)
         return y_t
+
+    def _native_forward(self, x: Tensor) -> Tensor:
+        """Host C++ engine via ctypes (``ternair.native.native.ternary_matmul``).
+
+        Backend dispatch at runtime picks AVX-512 / AVX-2 / scalar based
+        on CPU feature detection.  CPU only -- CUDA inputs trigger a
+        host round-trip and lose perf (this path is therefore never
+        selected via ``backend="auto"`` on CUDA).
+
+        For batch dimension B > 1 we iterate in Python (autoregressive
+        generation uses B == 1 -- zero overhead).  Allocations are
+        per-call (~64 KB on a typical model); caching buffers here would
+        create thread-safety issues for higher batch sizes.
+        """
+        from ternair.native import ternary_matmul
+
+        k_packed = self.in_f // 4
+        # Pack inputs once; per-batch row dispatch follows.
+        packed_2d = self.pw.view(self.out_f, k_packed).cpu().numpy()
+        gamma_1d = self.alpha.repeat(self.out_f).cpu().numpy()
+        x_flat = x.reshape(-1, self.in_f)
+        B = x_flat.shape[0]
+
+        y_rows: list[Tensor] = []
+        for i in range(B):
+            # Cast to fp16 and view as raw uint16 bits (matches the C ABI).
+            x_fp16 = x_flat[i].to(torch.float16).cpu().numpy()
+            x_bits = x_fp16.view(np.uint16)
+            y_bits = ternary_matmul(packed_2d, x_bits, gamma_1d)  # (out_f,) uint16
+            y_fp16 = y_bits.view(np.float16)
+            y_rows.append(torch.from_numpy(np.ascontiguousarray(y_fp16)))
+
+        out = torch.stack(y_rows, dim=0).view(*x.shape[:-1], self.out_f)
+        out = out.to(device=x.device, dtype=x.dtype)
+        if self.bias_buf is not None:
+            out = out + self.bias_buf.to(device=out.device, dtype=out.dtype)
+        return out
 
     def extra_repr(self) -> str:
         backend = self._resolved_backend or self.backend

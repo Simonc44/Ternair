@@ -23,6 +23,10 @@ mkdir -p "$BUILD_DIR"
 
 CXX="${CXX:-g++}"
 CXXFLAGS_BASE="-std=c++17 -O3 -fPIC -fvisibility=hidden -Wall -Wextra -DNDEBUG"
+# Shared library needs default visibility so ctypes (Python) can resolve
+# every ternair_* entry point.  Executables (CLI + test) stay hidden since
+# they statically link all symbols.
+CXXFLAGS_LIB="-std=c++17 -O3 -fPIC -fvisibility=default -Wall -Wextra -DNDEBUG"
 INC="-I$ROOT/include"
 
 # Auto-detect AVX-512F+AVX-512BW+AVX-512DQ
@@ -60,13 +64,13 @@ fi
 
 # Library
 echo "[build.sh] compiling libternair_native.so..."
-"$CXX" $CXXFLAGS_BASE $CPUFLAGS $INC -shared -o "$BUILD_DIR/libternair_native.so" \
+"$CXX" $CXXFLAGS_LIB $CPUFLAGS $INC -shared -o "$BUILD_DIR/libternair_native.so" \
     "${LIB_SOURCES[@]}" -lpthread
 
 # CLI
 echo "[build.sh] compiling ternair_native_cli..."
 CLI_SOURCES=("${LIB_SOURCES[@]}" "$ROOT/src/main.cpp")
-"$CXX" $CXXFLAGS_BASE $CPUFLAGS $INC -o "$BUILD_DIR/ternair_native_cli" \
+"$CXX" $CXXFLAGS_LIB $CPUFLAGS $INC -o "$BUILD_DIR/ternair_native_cli" \
     "${CLI_SOURCES[@]}" -L"$BUILD_DIR" -lternair_native -lpthread
 
 # C++ smoke test
@@ -79,7 +83,7 @@ fi
 if [[ "$CPUFLAGS" == *avx2* ]]; then
     TEST_SOURCES+=("$ROOT/src/matmul_avx2.cpp")
 fi
-"$CXX" $CXXFLAGS_BASE $CPUFLAGS $INC -o "$BUILD_DIR/ternair_native_test" \
+"$CXX" $CXXFLAGS_LIB $CPUFLAGS $INC -o "$BUILD_DIR/ternair_native_test" \
     "${TEST_SOURCES[@]}" -L"$BUILD_DIR" -lternair_native -lpthread
 
 echo
