@@ -186,6 +186,36 @@ classees par domaine.
 | C++ SIMD ARM NEON | `kernels/cpu_matmul.h` | CPU ARM | Stable |
 | **C++ header-only runtime** | `kernels/inference.h` | **Zero dep** | **Nouveau v0.2.0** |
 | **WebGPU / Wasm** | `kernels/webternair.py` | **Browser** | **Nouveau v0.3.0** |
+| **TernairDirectInferencer** (wrapper haut niveau, auto-select) | `model/inference.py` | **Dispatch kernels par couche** | **Nouveau v0.6.0** |
+| **`TernairLinear.set_inference_backend(backend)`** | `quantization/linear.py` | **`auto` / `torch` / `triton` / `cpu_cpp` / `numpy`** | **Nouveau v0.6.0** |
+
+### Mode d'inference direct
+
+```python
+from ternair.model.inference import TernairDirectInferencer
+
+inferer = TernairDirectInferencer(model, backend="auto")
+inferer.prepare()                        # freeze_storage + switch backend
+print(inferer.describe())                # requested / resolved / available
+
+logits = inferer.forward(input_ids)
+out = inferer.generate(input_ids, max_new_tokens=64,
+                       temperature=0.8, top_k=40, top_p=0.9)
+
+# Restoration
+inferer.restore()                        # remet chaque couche sur "auto"
+```
+
+CLI dediee (force `storage=fastpacked` pour activer les kernels) :
+
+```bash
+python -m ternair infer --profile tiny --backend auto --prompt "hello"
+python -m ternair infer --profile tiny --backend numpy --prompt "world"
+```
+
+Auto-selection : `triton` > `cpu_cpp` > `numpy` > `torch`. Les kernels
+ne fonctionnent qu'avec `storage="fastpacked"` et `in_features % 4 == 0` ;
+sinon `auto` retombe sur `torch` (jamais de regression).
 
 ---
 
@@ -224,6 +254,7 @@ python -m ternair info --profile tiny           # Config du modele
 python -m ternair size --profile one_gb          # Projection taille
 python -m ternair demo --profile tiny            # Demo complete
 python -m ternair train-one --profile tiny       # Test entrainement
+python -m ternair infer  --profile tiny --backend auto  # Mode inference direct
 ```
 
 ---
@@ -237,7 +268,7 @@ python -m ternair train-one --profile tiny       # Test entrainement
 | `scripts/qat_distill.py` | Distillation QAT HuggingFace |
 | `scripts/colab_distill.py` | Distillation pour Google Colab |
 | `scripts/wordy_colab.py` | Creer Wordy sur Colab |
-| `scripts/test_ci.py` | Tests CI (8 tests v0.3.0, 10+ tests v0.4.0) |
+| `scripts/test_ci.py` | Tests CI (18 tests v0.6.0 : generation, export, MoE, GGUF, pipeline, memory, packing_base8, triton_fast, direct_inference) |
 
 ---
 
@@ -278,6 +309,7 @@ src/ternair/
 │   ├── moe.py             # Ternary MoE
 │   ├── export.py          # SafeTensors + HuggingFace
 │   ├── generation.py      # Sampling, streaming, chat
+│   ├── inference.py       # TernairDirectInferencer (NOUVEAU v0.6.0)
 │   ├── size_profiles.py   # tiny/base/one_gb
 │   └── __init__.py
 ├── training/

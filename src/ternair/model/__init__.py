@@ -11,6 +11,7 @@ from ternair.model.hybrid_block import TernairHybridBlock
 from ternair.model.generation import generate, generate_stream, format_chat_prompt, decode_tokens
 from ternair.model.export import export_to_safetensors, export_huggingface_package, compute_compression_report, print_compression_report
 from ternair.model.size_profiles import tiny_profile, base_profile, one_gb_profile
+from ternair.model.inference import TernairDirectInferencer, BackendName as DirectBackendName
 
 __all__ = [
     "TernairConfig",
@@ -27,6 +28,8 @@ __all__ = [
     "generate_stream",
     "format_chat_prompt",
     "decode_tokens",
+    "TernairDirectInferencer",
+    "DirectBackendName",
     "export_to_safetensors",
     "export_huggingface_package",
     "compute_compression_report",

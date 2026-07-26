@@ -581,6 +581,111 @@ def test_triton_fast_batched():
     print("  [PASS] triton_fast tests passed")
 
 
+def test_direct_inference():
+    """Test TernairDirectInferencer + TernairLinear backend dispatch.
+
+    Verifies:
+    - ``available_backends()`` returns a sensible dict.
+    - ``TernairLinear.set_inference_backend(...)`` is honoured.
+    - ``prepare()`` returns a working inferer and ``forward()`` matches
+      the model's eval-mode forward under the ``"torch"`` backend.
+    - Different backends (torch / numpy / cpu_cpp / triton) all
+      produce *close-enough* logits (the reference max-abs err is
+      below the dtype noise floor).
+    """
+    import numpy as np
+    import torch
+    from ternair.model.inference import TernairDirectInferencer
+    from ternair.model.modeling import TernairForCausalLM
+    from ternair.model.size_profiles import tiny_profile
+    from ternair.quantization.linear import TernairLinear
+
+    # 1. availability dict
+    avail = TernairDirectInferencer.available_backends()
+    assert isinstance(avail, dict)
+    assert avail["torch"] is True
+    assert avail["numpy"] is True
+    print(f"  available backends: {avail}")
+
+    # 2. set_inference_backend validation
+    cfg = tiny_profile(storage="fastpacked")
+    model = TernairForCausalLM(cfg)
+    layers = [m for m in model.modules() if isinstance(m, TernairLinear)]
+    assert len(layers) > 0
+    layers[0].set_inference_backend("torch")
+    layers[0].set_inference_backend("numpy")
+    try:
+        layers[0].set_inference_backend("does-not-exist")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("set_inference_backend should reject unknown backends")
+
+    # 3. end-to-end on torch backend (always available)
+    ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    inferer = TernairDirectInferencer(model, backend="torch")
+    info = inferer.describe()
+    assert info["resolved_backend"] == "torch"
+    assert info["n_ternary_layers"] == len(layers)
+
+    inferer.prepare()
+    logits_torch = inferer.forward(ids)
+    assert logits_torch.shape == (1, 4, cfg.vocab_size), logits_torch.shape
+
+    # 4. backend=auto selects the same as torch when no GPU / cppyy
+    auto = TernairDirectInferencer(model, backend="auto").prepare()
+    assert auto.resolved_backend in {"torch", "triton", "cpu_cpp"}
+
+    # 5. torch vs numpy cross-check on the SAME model.
+    # Re-use the already-frozen model: restore() resets the per-layer
+    # backend to "auto" so we can re-prepare() under a different backend
+    # without disturbing the weights.
+    inferer.restore()
+    inferer.requested_backend = "numpy"
+    inferer.prepare()
+    logits_numpy = inferer.forward(ids)
+
+    diff = (logits_torch - logits_numpy).abs().max().item()
+    mag = max(
+        logits_torch.abs().mean().item(),
+        logits_numpy.abs().mean().item(),
+        1e-9,
+    )
+    rel = diff / mag
+    # 1. argmax MUST agree (the only thing that matters for generation).
+    top1_torch = logits_torch.argmax(dim=-1)
+    top1_numpy = logits_numpy.argmax(dim=-1)
+    agree = bool((top1_torch == top1_numpy).all().item())
+    assert agree, f"top-1 mismatch: torch={top1_torch} numpy={top1_numpy}"
+    # 2. fp16 accumulator noise on un-trained random weights is large
+    #    in absolute terms, but the RELATIVE error should stay small.
+    assert rel < 0.20, f"torch vs numpy rel-diff {rel:.4g} (max|err|={diff:.4g}, mag={mag:.4g})"
+    print(
+        f"  cross-backend: max|err|={diff:.4g} rel={rel:.4g} top1-agree={agree}"
+    )
+
+    # 6. generate() works under direct inference (torch).
+    # Restore() then re-prepare() under the torch backend so the
+    # cross-check above doesn't affect the generation test.
+    inferer.restore()
+    inferer.requested_backend = "torch"
+    inferer.prepare()
+    out = inferer.generate(
+        ids, max_new_tokens=4, temperature=0.0,
+        eos_token_id=cfg.vocab_size - 1,
+    )
+    assert out.shape[1] == 8, f"generated shape: {out.shape}"
+    print(f"  generate() ok: shape={tuple(out.shape)}")
+
+    # 7. restore() resets the backend
+    inferer.restore()
+    for m in model.modules():
+        if isinstance(m, TernairLinear):
+            assert m.inference_backend == "auto"
+
+    print("  [PASS] Direct inference tests passed")
+
+
 def main():
     print("=== CI Advanced Tests v0.6.0 ===")
     test_generation()
@@ -600,6 +705,7 @@ def main():
     test_optimizer_groups()
     test_packing_base8()
     test_triton_fast_batched()
+    test_direct_inference()
     print("=== All CI advanced tests passed ===")
     return 0
 

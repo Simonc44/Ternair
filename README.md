@@ -249,6 +249,56 @@ print('Runtime JS genere: ternair-web.js')
 "
 ```
 
+## Mode d'inference direct (TernairDirectInferencer)
+
+Le mode d'inference direct orchestre les kernels bas niveau (`triton_fast`, `cpu_matmul`, `packed_ops`) derriere une API unique. Selection automatique du meilleur backend selon le materiel detecte.
+
+```python
+from ternair.model.inference import TernairDirectInferencer
+
+inferer = TernairDirectInferencer(model, backend="auto")
+inferer.prepare()  # appelle freeze_storage() + route chaque TernairLinear
+
+# Inspection rapide
+print(inferer.describe())
+# {
+#   "requested_backend": "auto",
+#   "resolved_backend": "torch",      # ou "triton" / "cpu_cpp" / "numpy"
+#   "available": {"torch": True, "numpy": True, "triton": False, "cpu_cpp": False},
+#   "n_ternary_layers": 44,
+#   "device": "cpu",
+# }
+
+# Forward + generate (memes signatures que generation.generate/generate_stream)
+logits = inferer.forward(input_ids)
+out = inferer.generate(input_ids, max_new_tokens=64,
+                       temperature=0.8, top_k=40, top_p=0.9)
+
+# Streaming token par token
+for tok in inferer.generate_stream(input_ids, max_new_tokens=16):
+    print(tok.item(), end=" ", flush=True)
+
+# Restaurer le mode par defaut
+inferer.restore()
+```
+
+CLI dediee (le sous-commande force `storage=fastpacked` pour activer les kernels) :
+
+```bash
+python -m ternair infer --profile tiny --backend auto --prompt "hello" --max-new-tokens 16
+python -m ternair infer --profile tiny --backend numpy --prompt "world" --temperature 0.0
+python -m ternair infer --profile tiny --backend torch --prompt "demo"  # toujours disponible
+```
+
+| Backend | Materiel | Condition | Notes |
+|---------|----------|-----------|-------|
+| `triton` | GPU CUDA | `torch.cuda.is_available()` + `triton` install | Kernel 4 trits/octet, bit-arithmetic, grid 2-D `(M, B)` |
+| `cpu_cpp` | CPU x86 / ARM | `cppyy` + header compilable | AVX-512 / NEON intrinsics |
+| `numpy` | CPU | toujours disponible | Reference portable, fp16 accumulator |
+| `torch` | tout | toujours disponible | Dequantise puis `F.linear`, fallback par defaut |
+
+Auto-selection : `triton` > `cpu_cpp` > `numpy` > `torch`. Les kernels ne fonctionnent qu'avec `storage="fastpacked"` et `in_features % 4 == 0` ; sinon `auto` retombe sur `torch` (toujours correct, jamais de regression).
+
 ## Export HuggingFace
 
 ```python
@@ -473,6 +523,7 @@ src/ternair/
 │   ├── moe.py            # Ternary MoE experts (NOUVEAU v0.3.0)
 │   ├── export.py         # Export SafeTensors + HuggingFace
 │   ├── generation.py     # Sampling avance, streaming, chat
+│   ├── inference.py      # TernairDirectInferencer (dispatch kernels, NOUVEAU v0.6.0)
 │   └── ...
 ├── training/             # Planificateur WSD, optimiseur, entraineur
 ├── benchmark/

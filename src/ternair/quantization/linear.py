@@ -23,7 +23,7 @@ Key fixes vs previous version
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -42,6 +42,13 @@ from ternair.kernels.packing_base8 import (
 from ternair.quantization.ternary import _compute_gamma, ternary_linear_forward
 
 MODE_FASTPACKED: StorageMode = "fastpacked"  # type: ignore[assignment]
+
+# Inference backend choices for TernairLinear._eval_forward().
+#   "torch"   - default, reference path via F.linear(x, dequantised_w)
+#   "triton"  - fastpacked weights -> triton kernel (CUDA + triton only)
+#   "cpu_cpp" - cppyy + cpu_matmul.h C++ backend (AVX-512 / NEON)
+#   "numpy"   - pure-numpy reference (slowest, always available)
+InferenceBackend = Literal["auto", "torch", "triton", "cpu_cpp", "numpy"]
 
 
 @dataclass
@@ -114,6 +121,15 @@ class TernairLinear(nn.Module):
         # Learned alpha for QAT (per-output-channel scale).
         self._use_learned_alpha = False
         self.alpha: nn.Parameter | None = None
+
+        # Inference backend dispatch (overrides F.linear in eval mode).
+        #   "auto"   - resolved on first call to _resolve_backend()
+        #   "torch"  - default reference path (no regression)
+        #   "triton" - requires fastpacked storage + CUDA + triton
+        #   "cpu_cpp"- requires cppyy + the bundled cpu_matmul.h
+        #   "numpy"  - pure-numpy fallback (slow, always works)
+        self.inference_backend: InferenceBackend = "auto"
+        self._resolved_backend: InferenceBackend | None = None
 
         nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
         if self.bias is not None:
@@ -251,8 +267,168 @@ class TernairLinear(nn.Module):
         return F.linear(x, w_eff, self.bias)
 
     def _eval_forward(self, x: Tensor) -> Tensor:
+        backend = self._resolve_backend(x)
+        if backend == "torch":
+            weight = self._dequantise(x.dtype)
+            return F.linear(x, weight, self.bias)
+        if backend == "triton":
+            return self._triton_forward(x)
+        if backend == "cpu_cpp":
+            return self._cpu_cpp_forward(x)
+        if backend == "numpy":
+            return self._numpy_forward(x)
+        # Should not happen, but fall back to torch.
         weight = self._dequantise(x.dtype)
         return F.linear(x, weight, self.bias)
+
+    def _can_use_kernel_backends(self) -> bool:
+        """True iff the kernel backends (triton / cpu_cpp / numpy) can run.
+
+        Requirements:
+          * packed storage is ``fastpacked`` (4 trits/byte, 2 bits/v).
+          * ``in_features`` is a multiple of 4 so the 1-D packed
+            buffer reshapes cleanly to ``(out_features, K_packed)``.
+          * ``packed_weight`` has the expected size for the shape.
+        """
+        if self._pack_kind != MODE_FASTPACKED or self._packed_shape is None:
+            return False
+        out_features, in_features = self._packed_shape
+        if in_features % 4 != 0:
+            return False
+        expected = out_features * ((in_features + 3) // 4)
+        return int(self.packed_weight.numel()) == expected
+
+    # ------------------------------------------------------------------
+    # Backend resolution + dispatch
+    # ------------------------------------------------------------------
+    def _resolve_backend(self, x: Tensor) -> InferenceBackend:
+        """Pick the inference backend, honouring ``self.inference_backend``.
+
+        Cached once the first time the layer runs so we don't pay the
+        capability-check cost on every forward.
+        """
+        if self.inference_backend != "auto":
+            return self.inference_backend
+        if self._resolved_backend is not None:
+            return self._resolved_backend
+
+        # Auto: prefer triton on CUDA+fastpacked, else cpu_cpp on CPU,
+        # else numpy, else torch (always works).
+        # Kernel backends (triton / cpu_cpp / numpy) only work with the
+        # 4-trits-per-byte ``fastpacked`` layout AND ``in_features % 4 == 0``.
+        # For everything else (base8 / packed / int8 / non-divisible) we
+        # fall back to torch which is the safe, always-correct path.
+        if not self._can_use_kernel_backends():
+            backend = "torch"
+        else:
+            backend = "torch"
+            if x.is_cuda:
+                try:
+                    from ternair.kernels.triton_fast import has_triton
+
+                    if has_triton():
+                        backend = "triton"
+                except Exception:
+                    pass
+            else:
+                try:
+                    from ternair.kernels.cpu_matmul import has_cpu_backend
+
+                    if has_cpu_backend():
+                        backend = "cpu_cpp"
+                except Exception:
+                    pass
+                if backend == "torch":
+                    # numpy reference works for fastpacked + aligned shapes.
+                    backend = "numpy"
+        self._resolved_backend = backend
+        return backend
+
+    def _triton_forward(self, x: Tensor) -> Tensor:
+        from ternair.kernels.triton_fast import ternary_matmul_triton
+
+        if self._packed_shape is None:
+            raise RuntimeError("Call freeze_storage() first.")
+        out_features, in_features = self._packed_shape
+        assert in_features == self.in_features, (
+            f"packed shape {self._packed_shape} inconsistent with in_features={self.in_features}"
+        )
+        # Flatten leading dims: (..., in_features) -> (in_features, B*T)
+        x2 = x.reshape(-1, self.in_features)
+        packed = self.packed_weight.reshape(out_features, -1)
+        gamma = self.gamma_eval
+        y = ternary_matmul_triton(packed, x2, gamma, device=str(x.device))
+        # If kernel returned a torch tensor, add bias + reshape.
+        if isinstance(y, torch.Tensor):
+            y = y.view(*x.shape[:-1], self.out_features)
+            if self.bias is not None:
+                y = y + self.bias.to(y.dtype)
+            return y
+        # numpy fallback path
+        y_t = torch.from_numpy(np.ascontiguousarray(y)).to(device=x.device, dtype=x.dtype)
+        y_t = y_t.view(*x.shape[:-1], self.out_features)
+        if self.bias is not None:
+            y_t = y_t + self.bias.to(y_t.dtype)
+        return y_t
+
+    def _cpu_cpp_forward(self, x: Tensor) -> Tensor:
+        from ternair.kernels.cpu_matmul import ternary_matmul_cpp
+
+        if self._packed_shape is None:
+            raise RuntimeError("Call freeze_storage() first.")
+        out_features, in_features = self._packed_shape
+        x2 = x.reshape(-1, self.in_features).to(torch.float16).contiguous()
+        packed = self.packed_weight.reshape(out_features, -1).cpu().numpy()
+        gamma = self.gamma_eval.cpu().numpy()
+        # cpu_matmul_cpp is single-batch: loop over rows of x2.
+        out = np.empty((x2.shape[0], out_features), dtype=np.float16)
+        for b in range(x2.shape[0]):
+            out[b] = ternary_matmul_cpp(packed, x2[b].cpu().numpy(), gamma)
+        y_t = torch.from_numpy(np.ascontiguousarray(out)).to(device=x.device, dtype=x.dtype)
+        y_t = y_t.view(*x.shape[:-1], self.out_features)
+        if self.bias is not None:
+            y_t = y_t + self.bias.to(y_t.dtype)
+        return y_t
+
+    def _numpy_forward(self, x: Tensor) -> Tensor:
+        from ternair.kernels.packed_ops import ternary_matmul_numpy_batched
+
+        if self._packed_shape is None:
+            raise RuntimeError("Call freeze_storage() first.")
+        out_features, in_features = self._packed_shape
+        x2 = x.reshape(-1, self.in_features).to(torch.float16).contiguous()
+        packed = self.packed_weight.reshape(out_features, -1).cpu().numpy()
+        gamma = self.gamma_eval.cpu().numpy()
+        x_np = x2.cpu().numpy()
+        if x_np.ndim == 1:
+            x_np = x_np[np.newaxis, :]
+            squeeze = True
+        else:
+            squeeze = False
+        out = ternary_matmul_numpy_batched(packed, x_np, gamma)
+        if squeeze:
+            out = out.squeeze(0)
+        y_t = torch.from_numpy(np.ascontiguousarray(out)).to(device=x.device, dtype=x.dtype)
+        y_t = y_t.view(*x.shape[:-1], self.out_features)
+        if self.bias is not None:
+            y_t = y_t + self.bias.to(y_t.dtype)
+        return y_t
+
+    def set_inference_backend(self, backend: InferenceBackend) -> "TernairLinear":
+        """Force the inference backend used by :meth:`_eval_forward`.
+
+        Valid values: ``"auto" | "torch" | "triton" | "cpu_cpp" | "numpy"``.
+
+        ``"auto"`` (default) selects the best backend at first forward:
+        ``triton`` on CUDA+fastpacked, ``cpu_cpp`` on CPU when cppyy
+        is available, otherwise ``torch`` (always works).
+        """
+        valid = ("auto", "torch", "triton", "cpu_cpp", "numpy")
+        if backend not in valid:
+            raise ValueError(f"Unknown inference backend {backend!r}, expected one of {valid}")
+        self.inference_backend = backend
+        self._resolved_backend = None
+        return self
 
     def _dequantise(self, dtype: torch.dtype) -> Tensor:
         """Dequantise packed trits for eval-mode inference.
@@ -319,4 +495,4 @@ class TernairLinear(nn.Module):
         return packed_bytes + gamma_bytes
 
 
-__all__ = ["TernairLinear", "TernairLinearStorage"]
+__all__ = ["TernairLinear", "TernairLinearStorage", "InferenceBackend"]

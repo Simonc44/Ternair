@@ -15,12 +15,18 @@ The kernel operates directly on the fastpacked ``uint8`` buffer that
 :func:`ternair.kernels.packing_fast.pack_trits_2bit` produces.  No
 temporary float weight tensor is ever materialised.
 
-Usage::
+Usage (numpy, CPU fallback)::
 
     from ternair.kernels.triton_fast import ternary_matmul_triton
     y = ternary_matmul_triton(packed, x, gamma, device="cuda")
     # x: (B, N) float16, packed: (M, ceil(N/4)) uint8, gamma: (M,) float32
     # returns: (B, M) float16
+
+Usage (torch, real GPU)::
+
+    # No GPU->CPU->GPU roundtrip -- tensors are moved to CUDA in-place.
+    out = ternary_matmul_triton(packed_uint8, x_fp16, gamma_fp32,
+                                device="cuda")   # returns torch.Tensor on CUDA
 """
 
 from __future__ import annotations
@@ -62,15 +68,61 @@ def has_triton() -> bool:
     return bool(_HAS_TRITON)
 
 
+# ---------------------------------------------------------------------------
+# Mixed-input helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_torch_tensor(x: object) -> bool:
+    """True if ``x`` is a torch.Tensor (import lazily to avoid hard dep)."""
+    if not hasattr(x, "detach") or not hasattr(x, "cpu"):
+        return False
+    try:
+        import torch  # noqa: F401
+
+        return isinstance(x, torch.Tensor)
+    except Exception:
+        return False
+
+
+def _to_numpy(x: object) -> NDArray:
+    """Coerce torch.Tensor OR numpy array to a contiguous numpy array.
+
+    Triggers a GPU->CPU sync if ``x`` is a CUDA tensor -- callers that
+    care about staying on the GPU should use :func:`_to_torch` instead.
+    """
+    if x is None:
+        raise ValueError("Got None tensor")
+    if isinstance(x, np.ndarray):
+        return np.ascontiguousarray(x)
+    if _is_torch_tensor(x):
+        return np.ascontiguousarray(x.detach().cpu().numpy())
+    raise TypeError(f"Unsupported tensor type: {type(x).__name__}")
+
+
+def _to_torch(x: object, *, device: str, dtype) -> "torch.Tensor":
+    """Move a torch.Tensor / numpy array to the given device + dtype."""
+    import torch
+
+    if _is_torch_tensor(x):
+        return x.to(device=device, dtype=dtype)
+    return torch.from_numpy(np.ascontiguousarray(x)).to(device=device, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# Main kernel entry-point (mixed torch/numpy)
+# ---------------------------------------------------------------------------
+
+
 def ternary_matmul_triton(
-    packed: NDArray[np.uint8],
-    x: NDArray[np.float16],
-    gamma: NDArray[np.float32],
+    packed,
+    x,
+    gamma,
     *,
     device: str = "cuda",
     block_m: int = 64,
-) -> NDArray[np.float16]:
-    """Compute ``y = gamma * (W_t @ x.T).T`` on GPU.
+):
+    """Compute ``y = gamma * (W_t @ x.T).T`` on GPU or via fallback.
 
     Parameters
     ----------
@@ -78,9 +130,11 @@ def ternary_matmul_triton(
         ``(M, K_packed)`` ``uint8`` -- fastpacked weights
         (4 trits per byte, ``K_packed = ceil(N / 4)``).
     x
-        ``(B, N)`` ``float16`` -- input activations.  ``B = 1`` is OK.
+        ``(B, N)`` (or (N,)) float16 -- input activations.
+        ``np.ndarray`` or ``torch.Tensor`` (with a CUDA copy when Triton
+        is active, no sync back).
     gamma
-        ``(M,)`` ``float32`` -- per-output scaling factor.
+        ``(M,)`` float32 -- per-output scaling factor.
     device
         Target device (default ``"cuda"``).
     block_m
@@ -89,54 +143,67 @@ def ternary_matmul_triton(
     Returns
     -------
     y
-        ``(B, M)`` ``float16`` -- output activations.
+        ``(B, M)`` float16.  Returns a numpy array when the NumPy
+        fallback path runs, a torch.Tensor (on ``device``) when the
+        Triton path runs and at least one input was a torch.Tensor;
+        otherwise the result is moved back to the original layout.
     """
-    if not has_triton() or device != "cuda":
-        _LOGGER.info("Triton kernel unavailable on this host; using NumPy reference")
-        from ternair.kernels.packed_ops import ternary_matmul_numpy_batched
+    # ------------------------------------------------------------------
+    # Decide which path: torch-Triton OR numpy-fallback
+    # ------------------------------------------------------------------
+    use_triton = bool(has_triton() and device == "cuda")
+    input_is_torch = _is_torch_tensor(x) or _is_torch_tensor(packed) or _is_torch_tensor(gamma)
 
-        # Ensure 2-D input for the reference.
-        squeezed = False
-        if x.ndim == 1:
-            x = x[np.newaxis, :]
+    if not use_triton:
+        # Use NumPy fallback always.
+        return _numpy_fallback(packed, x, gamma)
+
+    # ------------------------------------------------------------------
+    # Triton path -- do NOT GPU->CPU->GPU : keep torch tensors on CUDA.
+    # ------------------------------------------------------------------
+    import torch
+    import triton
+
+    # Coerce / promote
+    packed_t = _to_torch(packed, device=device, dtype=torch.uint8)
+    gamma_t = _to_torch(gamma, device=device, dtype=torch.float32)
+    # x may be (N,) or (B, N) -- promote to 2-D and remember if we squeezed.
+    if _is_torch_tensor(x):
+        if x.dim() == 1:
+            x_t = x.to(device=device, dtype=torch.float16).unsqueeze(0)
             squeezed = True
-        out = ternary_matmul_numpy_batched(packed, x, gamma)
-        if squeezed:
-            out = out.squeeze(0)
-        return out
+        else:
+            x_t = x.to(device=device, dtype=torch.float16)
+            squeezed = False
+        out_dtype = torch.float16
+        out_device = device
+    else:
+        if x.ndim == 1:
+            x_t = (_to_torch(x, device=device, dtype=torch.float16)).unsqueeze(0)
+            squeezed = True
+        else:
+            x_t = _to_torch(x, device=device, dtype=torch.float16)
+            squeezed = False
+        out_dtype = torch.float16
+        out_device = device
 
-    # 1-D inputs get promoted to 2-D ``(1, N)`` to keep the kernel simple.
-    squeezed = False
-    if x.ndim == 1:
-        x = x[np.newaxis, :]
-        squeezed = True
+    if x_t.dim() != 2:
+        raise ValueError(f"x must be 1-D or 2-D, got shape {tuple(x_t.shape)}")
 
-    if x.ndim != 2:
-        raise ValueError(f"x must be 1-D or 2-D, got shape {x.shape}")
-    if packed.ndim != 2:
-        raise ValueError(f"packed must be 2-D (M, K_packed), got shape {packed.shape}")
-
-    B, N = x.shape
-    M, K_packed = packed.shape
+    B, N = x_t.shape
+    M, K_packed = packed_t.shape
     if K_packed != (N + 3) // 4:
         raise ValueError(
             f"packed.shape[1]={K_packed} inconsistent with N={N} "
             f"(expected ceil(N/4)={(N + 3) // 4})"
         )
-    if gamma.shape != (M,):
-        raise ValueError(f"gamma must be (M,), got {gamma.shape}")
-
-    import torch
-    import triton
+    if gamma_t.shape != (M,):
+        raise ValueError(f"gamma must be (M,), got {tuple(gamma_t.shape)}")
 
     # Lazy-compile the kernel once.
     _compile_kernel()
 
-    packed_t = torch.from_numpy(np.ascontiguousarray(packed)).to(device)
-    x_t = torch.from_numpy(np.ascontiguousarray(x)).to(device)
-    gamma_t = torch.from_numpy(np.ascontiguousarray(gamma)).to(device)
-    out_t = torch.empty((B, M), dtype=torch.float16, device=device)
-
+    out_t = torch.empty((B, M), dtype=out_dtype, device=out_device)
     grid = (triton.cdiv(M, block_m), B)
     assert _KERNEL is not None
     _KERNEL[grid](
@@ -148,7 +215,37 @@ def ternary_matmul_triton(
         BLOCK_M=block_m,
     )
 
-    out = out_t.cpu().numpy()
+    # If the user passed pure numpy inputs, move the result back to numpy.
+    if not input_is_torch:
+        out = out_t.cpu().numpy()
+        if squeezed:
+            out = out.squeeze(0)
+        return out
+
+    if squeezed:
+        return out_t.squeeze(0)
+    return out_t
+
+
+# ---------------------------------------------------------------------------
+# NumPy fallback path
+# ---------------------------------------------------------------------------
+
+
+def _numpy_fallback(packed, x, gamma):
+    from ternair.kernels.packed_ops import ternary_matmul_numpy_batched
+
+    packed_np = _to_numpy(packed)
+    x_np = _to_numpy(x).astype(np.float16, copy=False)
+    gamma_np = _to_numpy(gamma).astype(np.float32, copy=False)
+
+    if x_np.ndim == 1:
+        x_np = x_np[np.newaxis, :]
+        squeezed = True
+    else:
+        squeezed = False
+
+    out = ternary_matmul_numpy_batched(packed_np, x_np, gamma_np)
     if squeezed:
         out = out.squeeze(0)
     return out
@@ -162,16 +259,16 @@ def ternary_matmul_triton(
 
 
 def ternary_matmul_single_triton(
-    packed: NDArray[np.uint8],
-    x: NDArray[np.float16],
-    gamma: NDArray[np.float32],
+    packed,
+    x,
+    gamma,
     *,
     device: str = "cuda",
     block_m: int = 64,
-) -> NDArray[np.float16]:
+):
     """Backward-compat wrapper: ``(N,)`` -> ``(M,)`` output."""
     out = ternary_matmul_triton(packed, x, gamma, device=device, block_m=block_m)
-    if out.ndim == 2 and out.shape[0] == 1:
+    if hasattr(out, "ndim") and out.ndim == 2 and out.shape[0] == 1:
         out = out.squeeze(0)
     return out
 

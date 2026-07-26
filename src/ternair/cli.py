@@ -93,12 +93,76 @@ def _train_one(args: argparse.Namespace) -> int:
     return 0
 
 
+def _infer(args: argparse.Namespace) -> int:
+    """Direct-inference CLI -- uses TernairDirectInferencer + the kernels."""
+    import torch
+
+    from ternair.model.modeling import TernairForCausalLM
+    from ternair.model.inference import TernairDirectInferencer
+    from ternair.training.data import CharTokenizer, DEFAULT_CORPUS
+
+    profile = PROFILES[args.profile](storage=args.storage)
+    if profile.num_hidden_layers > 12 and not args.allow_big:
+        print(
+            f"[warn] profile {args.profile!r} has "
+            f"{profile.num_hidden_layers} layers; this demo will be slow on CPU. "
+            "Re-run with --allow-big if you want to proceed.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"Building ternair model ({args.profile}, storage={args.storage})…")
+    model = TernairForCausalLM(profile)
+    print(f"  ↳ ternary params : {model.count_parameters():,}")
+
+    # Wire the direct-inference backend (auto resolves to triton/cpu_cpp/torch).
+    inferer = TernairDirectInferencer(model, backend=args.backend, device=args.device)
+    info = inferer.describe()
+    print(
+        f"  ↳ backend: requested={info['requested_backend']} "
+        f"resolved={info['resolved_backend']} "
+        f"device={info['device']} "
+        f"ternary_layers={info['n_ternary_layers']}"
+    )
+
+    tok = CharTokenizer(DEFAULT_CORPUS)
+    ids = torch.tensor([tok.bos_id] + tok.encode(args.prompt), dtype=torch.long).unsqueeze(0)
+
+    # Smoke forward
+    inferer.prepare()
+    logits = inferer.forward(ids)
+    print(f"  ↳ forward logits shape: {tuple(logits.shape)}")
+
+    if args.max_new_tokens > 0:
+        out = inferer.generate(
+            ids,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            eos_token_id=tok.eos_id,
+        )
+        text = tok.decode(out[0].tolist())
+        print(f"  ↳ generated tokens : {out[0].tolist()}")
+        print(f"  ↳ decoded text     : {text!r}")
+
+    print(
+        f"  ↳ backend stats : available={TernairDirectInferencer.available_backends()}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ternair", description="BitNet-b1.58-style ternary LM")
     sub = p.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--storage", choices=["packed", "int8"], default="packed")
+    common.add_argument(
+        "--storage",
+        choices=["packed", "int8", "fastpacked"],
+        default="packed",
+        help="Packed storage format. fastpacked (4 trits/byte) is required for kernel backends.",
+    )
     common.add_argument(
         "--profile",
         choices=list(PROFILES),
@@ -130,6 +194,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_train.add_argument("--lr", type=float, default=1e-3)
     p_train.set_defaults(func=_train_one)
+
+    p_infer = sub.add_parser(
+        "infer",
+        parents=[common],
+        help=(
+            "Direct inference via TernairDirectInferencer "
+            "(auto-selects triton / cpu_cpp / torch kernels)."
+        ),
+    )
+    # Override the storage default for `infer`: the kernel backends only
+    # handle ``fastpacked`` (4 trits/byte). Force it here so users don't
+    # have to know the implementation detail.
+    p_infer.set_defaults(storage="fastpacked")
+    p_infer.add_argument(
+        "--backend",
+        choices=["auto", "torch", "triton", "cpu_cpp", "numpy"],
+        default="auto",
+        help="Which kernel to dispatch the ternary matmul to.",
+    )
+    p_infer.add_argument(
+        "--device",
+        default=None,
+        help="Optional device override (cuda / cpu). Default = model device.",
+    )
+    p_infer.add_argument("--max-new-tokens", type=int, default=16)
+    p_infer.add_argument("--temperature", type=float, default=1.0)
+    p_infer.add_argument("--top-k", type=int, default=0)
+    p_infer.add_argument("--top-p", type=float, default=0.0)
+    p_infer.add_argument("--prompt", default="hello world")
+    p_infer.add_argument(
+        "--allow-big", action="store_true",
+        help="Allow building larger profiles (slow on CPU).",
+    )
+    p_infer.set_defaults(func=_infer)
 
     return p
 
