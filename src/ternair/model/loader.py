@@ -598,9 +598,9 @@ def load_ternair_model(
     # 4) Walk the schema and replace layers
     replaced_modules: set[str] = set()
     if report.schema == "external":
-        _replace_external(model, tensors, replaced_modules, report)
+        _replace_external(model, tensors, replaced_modules, report, backend)
     else:
-        _replace_native(model, tensors, replaced_modules, report)
+        _replace_native(model, tensors, replaced_modules, report, backend)
 
     # 5) Load FP16 params (norms, embed, lm_head, biases) for keys not yet handled
     _load_fp16_remaining(model, tensors, replaced_modules, dtype, report)
@@ -628,6 +628,7 @@ def _replace_external(
     tensors: dict[str, Tensor],
     replaced: set[str],
     report: LoadReport,
+    backend: InferenceBackend = "auto",
 ) -> None:
     """Replace HF layers using the LLaMA ``.weight.packed / .alpha / .shape`` schema."""
     for key in list(tensors.keys()):
@@ -689,6 +690,7 @@ def _replace_native(
     tensors: dict[str, Tensor],
     replaced: set[str],
     report: LoadReport,
+    backend: InferenceBackend = "auto",
 ) -> None:
     """Fallback path: standard ``packed_weight`` / ``gamma_eval`` keys.
 
