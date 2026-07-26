@@ -354,7 +354,9 @@ class TernairLinear(nn.Module):
             f"packed shape {self._packed_shape} inconsistent with in_features={self.in_features}"
         )
         # Flatten leading dims: (..., in_features) -> (in_features, B*T)
-        x2 = x.reshape(-1, self.in_features)
+        # detach() so kernel backends never see a tensor that requires grad
+        # (e.g. when users run a frozen model inside a training graph).
+        x2 = x.reshape(-1, self.in_features).detach()
         packed = self.packed_weight.reshape(out_features, -1)
         gamma = self.gamma_eval
         y = ternary_matmul_triton(packed, x2, gamma, device=str(x.device))
@@ -377,7 +379,14 @@ class TernairLinear(nn.Module):
         if self._packed_shape is None:
             raise RuntimeError("Call freeze_storage() first.")
         out_features, in_features = self._packed_shape
-        x2 = x.reshape(-1, self.in_features).to(torch.float16).contiguous()
+        # detach() so the .numpy() call inside the per-batch loop never blows
+        # up if the caller left requires_grad=True on the input.
+        x2 = (
+            x.reshape(-1, self.in_features)
+            .detach()
+            .to(torch.float16)
+            .contiguous()
+        )
         packed = self.packed_weight.reshape(out_features, -1).cpu().numpy()
         gamma = self.gamma_eval.cpu().numpy()
         # cpu_matmul_cpp is single-batch: loop over rows of x2.
@@ -396,7 +405,15 @@ class TernairLinear(nn.Module):
         if self._packed_shape is None:
             raise RuntimeError("Call freeze_storage() first.")
         out_features, in_features = self._packed_shape
-        x2 = x.reshape(-1, self.in_features).to(torch.float16).contiguous()
+        # detach() so .cpu().numpy() never fails when the input tensor still
+        # requires grad (e.g. when users call forward on a frozen model
+        # without first calling .eval()).
+        x2 = (
+            x.reshape(-1, self.in_features)
+            .detach()
+            .to(torch.float16)
+            .contiguous()
+        )
         packed = self.packed_weight.reshape(out_features, -1).cpu().numpy()
         gamma = self.gamma_eval.cpu().numpy()
         x_np = x2.cpu().numpy()
