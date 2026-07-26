@@ -12,6 +12,13 @@ from ternair.model.generation import generate, generate_stream, format_chat_prom
 from ternair.model.export import export_to_safetensors, export_huggingface_package, compute_compression_report, print_compression_report
 from ternair.model.size_profiles import tiny_profile, base_profile, one_gb_profile
 from ternair.model.inference import TernairDirectInferencer, BackendName as DirectBackendName
+from ternair.model.loader import (
+    LoadReport,
+    TernaryLinearFast,
+    load_ternair_model,
+    llama_to_hf,
+    unpack_2bit,
+)
 
 __all__ = [
     "TernairConfig",
@@ -30,6 +37,11 @@ __all__ = [
     "decode_tokens",
     "TernairDirectInferencer",
     "DirectBackendName",
+    "LoadReport",
+    "TernaryLinearFast",
+    "load_ternair_model",
+    "llama_to_hf",
+    "unpack_2bit",
     "export_to_safetensors",
     "export_huggingface_package",
     "compute_compression_report",

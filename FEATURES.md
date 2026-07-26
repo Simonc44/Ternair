@@ -188,6 +188,8 @@ classees par domaine.
 | **WebGPU / Wasm** | `kernels/webternair.py` | **Browser** | **Nouveau v0.3.0** |
 | **TernairDirectInferencer** (wrapper haut niveau, auto-select) | `model/inference.py` | **Dispatch kernels par couche** | **Nouveau v0.6.0** |
 | **`TernairLinear.set_inference_backend(backend)`** | `quantization/linear.py` | **`auto` / `torch` / `triton` / `cpu_cpp` / `numpy`** | **Nouveau v0.6.0** |
+| **`load_ternair_model(path)` (one-liner)** | `model/loader.py` | **Charge un modele LLaMA/Mistral ternaire depuis SafeTensors** | **Nouveau v0.6.0** |
+| **`TernaryLinearFast` + `unpack_2bit` + `llama_to_hf`** | `model/loader.py` | **Module nn.Linear compatible, decompresse le 2-bit a la volee** | **Nouveau v0.6.0** |
 
 ### Mode d'inference direct
 
@@ -268,7 +270,7 @@ python -m ternair infer  --profile tiny --backend auto  # Mode inference direct
 | `scripts/qat_distill.py` | Distillation QAT HuggingFace |
 | `scripts/colab_distill.py` | Distillation pour Google Colab |
 | `scripts/wordy_colab.py` | Creer Wordy sur Colab |
-| `scripts/test_ci.py` | Tests CI (18 tests v0.6.0 : generation, export, MoE, GGUF, pipeline, memory, packing_base8, triton_fast, direct_inference) |
+| `scripts/test_ci.py` | Tests CI (19 tests v0.6.0 : generation, export, MoE, GGUF, pipeline, memory, packing_base8, triton_fast, direct_inference, ternair_loader) |
 
 ---
 
@@ -310,6 +312,7 @@ src/ternair/
 │   ├── export.py          # SafeTensors + HuggingFace
 │   ├── generation.py      # Sampling, streaming, chat
 │   ├── inference.py       # TernairDirectInferencer (NOUVEAU v0.6.0)
+│   ├── loader.py          # load_ternair_model HF LLaMA/Mistral (NOUVEAU v0.6.0)
 │   ├── size_profiles.py   # tiny/base/one_gb
 │   └── __init__.py
 ├── training/

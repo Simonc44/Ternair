@@ -686,6 +686,153 @@ def test_direct_inference():
     print("  [PASS] Direct inference tests passed")
 
 
+def test_ternair_loader():
+    """Test the HuggingFace ternary loader (``load_ternair_model``).
+
+    Exercises:
+    - :func:`unpack_2bit` round-trip parity with ``packing_fast``.
+    - :func:`llama_to_hf` key mapping (8 cases).
+    - :class:`TernaryLinearFast` forward + ``.to(device)`` + ``.half()``.
+    - End-to-end :func:`load_ternair_model` on a tiny Llama config
+      (auto-skips if ``transformers`` is not installed).
+    """
+    import json
+    import os
+    import shutil
+    import tempfile
+    import numpy as np
+    import torch
+
+    from ternair.model.loader import (
+        LoadReport,
+        TernaryLinearFast,
+        load_ternair_model,
+        llama_to_hf,
+        unpack_2bit,
+    )
+
+    # ----- 1. unpack_2bit parity with packing_fast -----
+    rng = np.random.default_rng(2)
+    out_f, in_f = 32, 64  # multiples of 4 for clean packing
+    trits_np = rng.integers(-1, 2, size=(out_f * in_f,)).astype(np.int8)
+    from ternair.kernels.packing_fast import pack_trits_2bit
+    packed = pack_trits_2bit(trits_np).astype(np.uint8)
+    decoded = unpack_2bit(torch.from_numpy(packed), out_f, in_f).numpy()
+    assert np.array_equal(decoded.flatten(), trits_np), "unpack_2bit mismatch"
+    print("  unpack_2bit: round-trip parity with packing_fast OK")
+
+    # ----- 2. llama_to_hf key mapping -----
+    assert llama_to_hf("model.layers.0.self_attn.q_proj") == "model.layers.0.self_attn.q_proj"
+    assert llama_to_hf("layers.0.attention.wq") == "model.layers.0.self_attn.q_proj"
+    assert llama_to_hf("layers.3.feed_forward.w1") == "model.layers.3.mlp.gate_proj"
+    assert llama_to_hf("tok_embeddings") == "model.embed_tokens"
+    assert llama_to_hf("norm") == "model.norm"
+    assert llama_to_hf("output") == "lm_head"
+    assert llama_to_hf("layers.0.attention_norm") == "model.layers.0.input_layernorm"
+    assert llama_to_hf("totally.unrelated") is None
+    print("  llama_to_hf: 8 key mapping cases OK")
+
+    # ----- 3. TernaryLinearFast forward + device + dtype -----
+    layer = TernaryLinearFast(
+        packed=torch.from_numpy(packed),
+        alpha=0.5,
+        out_f=out_f,
+        in_f=in_f,
+    )
+    x = torch.randn(2, 4, in_f, dtype=torch.float32)
+    y = layer(x)
+    assert y.shape == (2, 4, out_f), y.shape
+    layer.to(torch.float16)
+    y2 = layer(x.half())
+    assert y2.shape == (2, 4, out_f) and y2.dtype == torch.float16
+    print(f"  TernaryLinearFast: out={tuple(y.shape)} dtype={y2.dtype}")
+
+    # ----- 4. End-to-end load_ternair_model -----
+    try:
+        from transformers import AutoConfig  # type: ignore
+    except ImportError:
+        print("  [SKIP] transformers not installed -- skipping end-to-end loader test")
+        print("  [PASS] Ternair loader tests passed")
+        return
+
+    tmp = tempfile.mkdtemp(prefix="ternair_loader_")
+    try:
+        cfg_dict = {
+            "architectures": ["LlamaForCausalLM"],
+            "model_type": "llama",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "max_position_embeddings": 32,
+            "vocab_size": 128,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 10000.0,
+            "torch_dtype": "float16",
+        }
+        with open(os.path.join(tmp, "config.json"), "w") as f:
+            json.dump(cfg_dict, f)
+
+        from safetensors.numpy import save_file as np_save_file
+
+        st = {}
+        L, H, I, V = 2, 64, 128, 128
+        for layer_i in range(L):
+            for llama_path, (o_f, i_f) in {
+                f"layers.{layer_i}.attention.wq": (H, H),
+                f"layers.{layer_i}.attention.wk": (H, H),
+                f"layers.{layer_i}.attention.wv": (H, H),
+                f"layers.{layer_i}.attention.wo": (H, H),
+                f"layers.{layer_i}.feed_forward.w1": (I, H),
+                f"layers.{layer_i}.feed_forward.w2": (H, I),
+                f"layers.{layer_i}.feed_forward.w3": (I, H),
+            }.items():
+                assert i_f % 4 == 0 and o_f % 4 == 0
+                trits = rng.integers(-1, 2, size=(o_f * i_f,)).astype(np.int8)
+                pb = pack_trits_2bit(trits).astype(np.uint8)
+                st[llama_path + ".weight.packed"] = pb
+                st[llama_path + ".weight.alpha"] = np.float32(0.5)
+                st[llama_path + ".weight.shape"] = np.asarray([o_f, i_f], dtype=np.int64)
+
+        # Embed (will be unpacked into an FP16 Embedding).
+        embed_trits = rng.integers(-1, 2, size=(V * H,)).astype(np.int8)
+        st["tok_embeddings.weight.packed"] = pack_trits_2bit(embed_trits).astype(np.uint8)
+        st["tok_embeddings.weight.alpha"] = np.float32(0.5)
+        st["tok_embeddings.weight.shape"] = np.asarray([V, H], dtype=np.int64)
+
+        # Norms + final norm (FP16).
+        st["layers.0.attention_norm"] = np.ones(H, dtype=np.float16)
+        st["layers.0.ffn_norm"] = np.ones(H, dtype=np.float16)
+        st["layers.1.attention_norm"] = np.ones(H, dtype=np.float16)
+        st["layers.1.ffn_norm"] = np.ones(H, dtype=np.float16)
+        st["norm"] = np.ones(H, dtype=np.float16)
+
+        np_save_file(st, os.path.join(tmp, "model_ternair_2bit.safetensors"))
+
+        model, tokenizer, report = load_ternair_model(tmp, device="cpu")
+        assert isinstance(report, LoadReport)
+        assert report.schema == "external"
+        assert report.n_ternary_layers >= 14  # 2 layers * 7 matmuls + embed
+        assert report.n_meta_materialised > 0, "expected some meta materialised (norms)"
+        print(
+            f"  load_ternair_model: schema={report.schema} "
+            f"ternary={report.n_ternary_layers} fp16={report.n_fp16_tensors} "
+            f"meta={report.n_meta_materialised}"
+        )
+
+        ids = torch.randint(0, V, (1, 4))
+        with torch.no_grad():
+            raw = model(ids)
+            out = raw.logits if hasattr(raw, "logits") else raw
+        assert out.shape[-1] == V, out.shape
+        print(f"  loader forward: logits shape={tuple(out.shape)}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print("  [PASS] Ternair loader tests passed")
+
+
 def main():
     print("=== CI Advanced Tests v0.6.0 ===")
     test_generation()
@@ -706,6 +853,7 @@ def main():
     test_packing_base8()
     test_triton_fast_batched()
     test_direct_inference()
+    test_ternair_loader()
     print("=== All CI advanced tests passed ===")
     return 0
 

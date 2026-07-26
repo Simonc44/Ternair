@@ -299,6 +299,50 @@ python -m ternair infer --profile tiny --backend torch --prompt "demo"  # toujou
 
 Auto-selection : `triton` > `cpu_cpp` > `numpy` > `torch`. Les kernels ne fonctionnent qu'avec `storage="fastpacked"` et `in_features % 4 == 0` ; sinon `auto` retombe sur `torch` (toujours correct, jamais de regression).
 
+## Charger un modele ternaire depuis SafeTensors (load_ternair_model)
+
+Le module `ternair.model.loader` permet d'instancier en une ligne un modele LLaMA / Mistral qui a ete exporte en "ternary SafeTensors" (schema externe `.weight.packed / .weight.alpha / .weight.shape`). Utile pour deployer un modele QAT-distille (Mistral 7B, LLaMA-3, etc.) sans manipulation manuelle.
+
+```python
+from ternair import load_ternair_model
+
+model, tokenizer = load_ternair_model(
+    r"C:\\Users\\admin\\Documents\\Mistral 7B\\mistral-7b-v0.3-ternair",
+    device="cuda",
+)
+prompt = "The future of artificial intelligence is"
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+out = model.generate(
+    **inputs, max_new_tokens=80, do_sample=True,
+    temperature=0.7, top_p=0.9, repetition_penalty=1.1,
+    pad_token_id=tokenizer.eos_token_id,
+)
+print(tokenizer.decode(out[0], skip_special_tokens=True))
+```
+
+Sous le capot :
+
+1. Charge `config.json` + `AutoTokenizer` depuis le dossier.
+2. Construit le modele HF sur meta device (zero RAM allouee).
+3. Lit `model_ternair_2bit.safetensors` (schema externe auto-detecte, fallback sur le schema natif `packing_base8`).
+4. Remplace chaque `nn.Linear` par un `TernaryLinearFast` (decompression 2-bit a la volee + echelle alpha).
+5. Materialise les tenseurs meta residuels, deplace vers le device, passe en `eval()`.
+
+API minimale :
+
+```python
+from ternair import TernaryLinearFast, LoadReport, llama_to_hf, unpack_2bit
+```
+
+Le schema externe supporte :
+
+* `model.layers.X.attention.wq/wk/wv/wo.weight.packed` (uint8, 4 trits/octet)
+* `model.layers.X.attention.wq/wk/wv/wo.weight.alpha` (float32 scalaire par couche)
+* `model.layers.X.attention.wq/wk/wv/wo.weight.shape` (int64 `[out, in]`)
+* `model.layers.X.feed_forward.w1/w2/w3.*` (memes conventions)
+* `tok_embeddings.*` (sera decode en FP16 Embedding), `norm`, `output`, `attention_norm`, `ffn_norm` (FP16)
+* `*.bias` optionnels (FP16 ou FP32)
+
 ## Export HuggingFace
 
 ```python
@@ -524,6 +568,7 @@ src/ternair/
 │   ├── export.py         # Export SafeTensors + HuggingFace
 │   ├── generation.py     # Sampling avance, streaming, chat
 │   ├── inference.py      # TernairDirectInferencer (dispatch kernels, NOUVEAU v0.6.0)
+│   ├── loader.py         # load_ternair_model (HF LLaMA/Mistral, NOUVEAU v0.6.0)
 │   └── ...
 ├── training/             # Planificateur WSD, optimiseur, entraineur
 ├── benchmark/
