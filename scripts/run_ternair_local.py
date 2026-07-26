@@ -49,6 +49,19 @@ Useful flags
     --show-resolved
         Print the resolved inference backend for every ternary
         layer in the model.
+    --mini-smoke
+        Skip --model-dir entirely and run the **bundled tiny** model
+        (``ternair.model.size_profiles.tiny_profile`` = hidden 256,
+        8 layers, ~2.6 M params).  Uses the in-package ``CharTokenizer``
+        so no transformer/safetensors download is needed.  Finishes in
+        **~5 seconds on CPU** -- the canonical way to verify your
+        Ternair install before attempting a 7B model.
+    --abort-no-progress SEC
+        Abort generation cleanly if no token comes out within ``SEC``
+        seconds.  Use this to avoid waiting hours on a hung CPU/numpy
+        inference on a 7B model.  ``0`` = disabled (default).  Suggested
+        values: ``600`` for 7B CPU/numpy, ``60`` for tiny, ``30`` for
+        CUDA + triton.
 
 Requirements
 ------------
@@ -62,6 +75,28 @@ Requirements
 On Windows, g++ is not installed by default.  Either install MSYS2
 (https://www.msys2.org/) and run ``pacman -S mingw-w64-x86_64-gcc``,
 or run everything under WSL.
+
+Quick start (recommended first step)
+------------------------------------
+1.  Verify the install in 5 seconds with the bundled tiny model
+    (runs end-to-end without a downloaded 7B checkpoint)::
+
+        py scripts\\run_ternair_local.py --mini-smoke --max-new-tokens 16
+
+2.  Install g++ (Windows + MSYS2) so the native AVX-2 backend kicks
+    in automatically and 7B inference becomes ~10x faster::
+
+        # https://www.msys2.org/ then:
+        pacman -S mingw-w64-x86_64-gcc
+
+3.  Finally, run the real 7B model -- and add --abort-no-progress
+    so a hang never costs you more than a few minutes::
+
+        py scripts\\run_ternair_local.py ^
+            --model-dir "C:\\Users\\admin\\Documents\\Mistral 7B\\mistral-7b-v0.3-ternair" ^
+            --prompt "Hello" ^
+            --max-new-tokens 4 ^
+            --abort-no-progress 300
 """
 
 from __future__ import annotations
@@ -211,10 +246,15 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
+        "--mini-smoke", action="store_true",
+        help="Skip --model-dir; run the bundled tiny model (~2.6 M params) "
+             "with the in-package CharTokenizer.  No downloads, ~5 s on CPU.",
+    )
+    p.add_argument(
         "--model-dir",
-        required=True,
+        required=False,  # --mini-smoke makes it optional
         help="Directory holding config.json, tokenizer files, and "
-             "model_ternair_2bit.safetensors.",
+             "model_ternair_2bit.safetensors.  Not required when --mini-smoke is set.",
     )
     p.add_argument(
         "--safetensors-name",
@@ -275,6 +315,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--show-resolved", action="store_true",
         help="Print the resolved inference backend for every ternary layer.",
+    )
+    p.add_argument(
+        "--abort-no-progress", type=int, default=0,
+        help="If no token is produced within this many seconds, abort "
+             "generation cleanly (returns exit code 8).  0 = disabled.",
     )
     return p.parse_args()
 
@@ -366,10 +411,80 @@ def main() -> int:
         print("  native module not importable (will rely on numpy/torch).")
 
     # ------------------------------------------------------------------
-    # Step 3: load the model
+    # Step 3: load the model  (or fall back to --mini-smoke)
     # ------------------------------------------------------------------
-    banner("Step 3: load model")
     import torch
+
+    if args.mini_smoke and args.model_dir:
+        print("  ERROR: --mini-smoke cannot be combined with --model-dir.")
+        return 2
+
+    # Resolve target device early so the mini-smoke branch (which skips
+    # HF loader entirely) can still use it.
+    if args.device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+
+    # If --mini-smoke, build the bundled tiny model and skip everything
+    # below.  This is the canonical "is my Ternair install healthy?"
+    # check -- it completes in ~5 s on CPU/numpy and exercises every
+    # code path that the 7B runner does (just on a 2.6 M-parameter
+    # model that fits in cache).
+    model = None
+    tokenizer = None
+    report = None
+    if args.mini_smoke:
+        from ternair.model.modeling import TernairForCausalLM
+        from ternair.model.size_profiles import tiny_profile
+        from ternair.model.generation import generate as _generate_tokens
+        from ternair.training.data import CharTokenizer, DEFAULT_CORPUS
+
+        banner("Step 3: load model  [MINI-SMOKE]")
+        print("  using bundled tiny profile (hidden 256, 8 layers).")
+        cfg = tiny_profile()
+        print(f"  building model on device={device} ...", flush=True)
+        model = TernairForCausalLM(cfg)
+        print(f"  ternary params : {model.count_parameters():,}", flush=True)
+        print(f"  freeze_storage() ...", flush=True)
+        model.freeze_storage()
+        model.eval()
+        model.to(device)
+        print(f"  loaded on {device.upper()}.")
+
+        tok = CharTokenizer(DEFAULT_CORPUS)
+        ids = torch.tensor(
+            [tok.bos_id] + tok.encode(args.prompt)
+        , dtype=torch.long).unsqueeze(0).to(device)
+        attention_mask = torch.ones_like(ids)
+        report = None  # mini-smoke has no LoadReport, but downstream needs it
+        print(f"  prompt tokens (first 20): {ids[0, :20].tolist()}")
+        # Jump straight to generation (skip Step 4 streaming wrapper).
+        banner("Step 4: generate  [MINI-SMOKE]")
+        print(f"\n  --- generation ({args.max_new_tokens} tokens max) ---")
+        import time as _t
+        t0 = _t.perf_counter()
+        try:
+            out = _generate_tokens(
+                model, ids,
+                max_new_tokens=args.max_new_tokens,
+                temperature=max(args.temperature, 1e-5),
+                top_k=args.top_k,
+                top_p=args.top_p,
+                eos_token_id=tok.eos_id,
+            )
+        except Exception as exc:
+            print(f"  generate raised: {type(exc).__name__}: {exc}")
+            return 5
+        decoded = tok.decode(out[0].tolist())
+        print(decoded)
+        elapsed = _t.perf_counter() - t0
+        print(f"\n  --- done in {elapsed:6.2f}s ---")
+        print(f"  codebase self-test PASSED in {elapsed:.2f}s.")
+        banner("Done.")
+        return 0
+
+    banner("Step 3: load model")
     from ternair import load_ternair_model
 
     model_dir = Path(args.model_dir).expanduser().resolve()
@@ -509,38 +624,93 @@ def main() -> int:
     n_tokens_emitted = 0
 
     if streamer is not None:
+        # ------------------------------------------------------------------
+        # --abort-no-progress watchdog: a one-shot threading.Timer that
+        # fires os._exit(8) if no token comes out within N seconds.
+        # Every chunk resets the timer.  Cancelled on completion.
+        # This is the exact fix for the user-reported "stuck for 2h"
+        # symptom on CPU/numpy with a 7B model.
+        # ------------------------------------------------------------------
+        import threading as _threading
+
+        class _GenerationWatchdog:
+            def __init__(self, max_sec: int) -> None:
+                if max_sec <= 0:
+                    self._timer = None
+                    return
+                self.max_sec = max_sec
+                self._timer = _threading.Timer(max_sec, self._fire)
+                self._timer.daemon = True
+                self._timer.start()
+
+            def ping(self) -> None:
+                if self._timer is None:
+                    return
+                self._timer.cancel()
+                self._timer = _threading.Timer(self.max_sec, self._fire)
+                self._timer.daemon = True
+                self._timer.start()
+
+            def cancel(self) -> None:
+                if self._timer is not None:
+                    self._timer.cancel()
+
+            def _fire(self) -> None:
+                print(
+                    f"\n\n  === ABORT ===\n"
+                    f"  no token emitted within {self.max_sec} s.\n"
+                    f"  For a 7B model on CPU without the native C++ engine,\n"
+                    f"  each token can take 5-30 minutes.  If you expected fast\n"
+                    f"  generation, install MSYS2 + `pacman -S mingw-w64-x86_64-gcc`\n"
+                    f"  so the AVX-2 backend kicks in (Linux/macOS: build-essential).\n"
+                    f"  Exiting with code 8.\n",
+                    flush=True,
+                )
+                os._exit(8)
+
+        watchdog = _GenerationWatchdog(args.abort_no_progress)
+        if args.abort_no_progress > 0:
+            print(f"  watchdog: abort if no token in {args.abort_no_progress}s "
+                  f"(Ctrl-C to cancel earlier).", flush=True)
+
         # Background thread runs model.generate(...); main thread drains
         # the streamer and prints chunks as they arrive.
         gen_thread = Thread(target=model.generate, kwargs=gen_kwargs, daemon=True)
         gen_thread.start()
         try:
             for chunk in streamer:
+                watchdog.ping()
                 print(chunk, end="", flush=True)
                 n_tokens_emitted += len(chunk.split()) if chunk else 0
         except KeyboardInterrupt:
+            watchdog.cancel()
             print("\n  interrupted (Ctrl-C).  Cancelling generation ...", flush=True)
             gen_thread.join(timeout=2.0)
             return 7
+        watchdog.cancel()
         gen_thread.join()
     else:
         # Fallback: blocking generate. Time it so the user has a signal.
+        watchdog = _GenerationWatchdog(args.abort_no_progress)
+        if args.abort_no_progress > 0:
+            print(f"  watchdog: abort if generate() does not return "
+                  f"within {args.abort_no_progress}s.", flush=True)
         with torch.no_grad():
             try:
                 outputs = model.generate(**gen_kwargs)
+                watchdog.ping()  # generation returned -- safe to cancel
             except Exception as exc:
+                watchdog.cancel()
                 print(f"  generate raised: {type(exc).__name__}: {exc}")
                 return 5
         if tokenizer is not None:
             print(tokenizer.decode(outputs[0], skip_special_tokens=True))
         else:
             print(" ".join(str(int(t)) for t in outputs[0].tolist()))
+        watchdog.cancel()
 
     elapsed = time.perf_counter() - t_start
     print(f"\n  --- done in {elapsed:6.1f}s ---")
-
-    # ------------------------------------------------------------------
-    # Step 5: resolved-backend summary
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Step 5: resolved-backend summary
