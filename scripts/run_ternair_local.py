@@ -412,47 +412,135 @@ def main() -> int:
     # ------------------------------------------------------------------
     banner("Step 4: generate")
 
+    # Warn early when the user is about to do autoregressive generation on
+    # CPU without the native SIMD engine. The numpy / torch fallback on a
+    # 7B-class ternary model is realistically O(minutes) per token, so
+    # --max-new-tokens 80 will take hours. Suggest --max-new-tokens 4 for
+    # a quick smoke test, or install MSYS2 g++ for ~10x speedup.
+    try:
+        from ternair import native as _native_avail
+    except Exception:
+        _native_avail = None
+    native_ok = bool(_native_avail and _native_avail.available())
+    if (not native_ok) and (report.n_ternary_layers > 100) and (args.max_new_tokens > 8):
+        print(
+            f"  WARNING: native backend unavailable but model has "
+            f"{report.n_ternary_layers} ternary layers and you asked for "
+            f"{args.max_new_tokens} tokens. CPU/numpy generation will be "
+            f"VERY SLOW (often 1+ minute per token on a 7B model).\n"
+            f"  Tip 1: re-run with --max-new-tokens 4 for an end-to-end smoke test.\n"
+            f"  Tip 2: install MSYS2 then `pacman -S mingw-w64-x86_64-gcc` for "
+            f"AVX-2 acceleration (~10x).\n"
+            f"  Tip 3: GPU + --backend triton is even faster.\n"
+            f"  Continuing in 3 seconds (Ctrl-C to abort)...\n"
+        )
+        try:
+            import time as _t
+            _t.sleep(3)
+        except KeyboardInterrupt:
+            print("  aborted.")
+            return 6
+
     if tokenizer is None:
         print("  tokenizer NOT LOADED -- falling back to integer-token prompt.")
         try:
             ids = torch.tensor(
                 [list(map(int, args.prompt.split(",")))], dtype=torch.long
             ).to(device)
+            attention_mask = torch.ones_like(ids)
         except ValueError:
             print(f"  ERROR: --prompt is non-numeric and no tokenizer was "
                   f"found in {model_dir}.")
             return 4
     else:
-        inputs = tokenizer(args.prompt, return_tensors="pt").to(device)
-        ids = inputs["input_ids"]
+        enc = tokenizer(args.prompt, return_tensors="pt", padding=False)
+        ids = enc["input_ids"].to(device)
+        # Explicit attention_mask (kills the transformers warning and avoids
+        # the model treating pad=eos as "all-eos").
+        attention_mask = enc.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(ids)
+        else:
+            attention_mask = attention_mask.to(device)
         print(f"  prompt tokens (first 20): {ids[0, :20].tolist()}")
 
-    with torch.no_grad():
-        try:
-            outputs = model.generate(
-                input_ids=ids,
-                max_new_tokens=args.max_new_tokens,
-                do_sample=args.temperature > 0,
-                temperature=max(args.temperature, 1e-5),
-                top_p=args.top_p,
-                top_k=args.top_k,
-                repetition_penalty=args.repetition_penalty,
-                pad_token_id=(
-                    tokenizer.eos_token_id if tokenizer is not None
-                    else ids[0, -1].item()
-                ),
-            )
-        except Exception as exc:
-            print(f"  generate raised: {type(exc).__name__}: {exc}")
-            return 5
+    # ------------------------------------------------------------------
+    # Streaming via TextIteratorStreamer -- lets the user see the
+    # generation progress token-by-token instead of waiting for the whole
+    # max_new_tokens pass to finish. Returns output to the precise same
+    # final string as a blocking model.generate() call would.
+    # ------------------------------------------------------------------
+    import time
+    from threading import Thread
 
-    print()
-    print("  " + "=" * 60)
-    if tokenizer is not None:
-        print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+    streamer = None
+    try:
+        if tokenizer is not None:
+            from transformers import TextIteratorStreamer  # type: ignore
+            streamer = TextIteratorStreamer(
+                tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True,
+            )
+    except Exception as exc:
+        streamer = None
+        print(f"  (TextIteratorStreamer unavailable: {exc!r}; using blocking generate)")
+
+    pad_token_id = (
+        tokenizer.eos_token_id if tokenizer is not None else int(ids[0, -1].item())
+    )
+
+    gen_kwargs = dict(
+        input_ids=ids,
+        attention_mask=attention_mask,
+        max_new_tokens=args.max_new_tokens,
+        do_sample=args.temperature > 0,
+        temperature=max(args.temperature, 1e-5),
+        top_p=args.top_p,
+        top_k=args.top_k,
+        repetition_penalty=args.repetition_penalty,
+        pad_token_id=pad_token_id,
+    )
+    if streamer is not None:
+        gen_kwargs["streamer"] = streamer
+
+    print(f"\n  --- generation ({args.max_new_tokens} tokens max) ---")
+    t_start = time.perf_counter()
+    n_tokens_emitted = 0
+
+    if streamer is not None:
+        # Background thread runs model.generate(...); main thread drains
+        # the streamer and prints chunks as they arrive.
+        gen_thread = Thread(target=model.generate, kwargs=gen_kwargs, daemon=True)
+        gen_thread.start()
+        try:
+            for chunk in streamer:
+                print(chunk, end="", flush=True)
+                n_tokens_emitted += len(chunk.split()) if chunk else 0
+        except KeyboardInterrupt:
+            print("\n  interrupted (Ctrl-C).  Cancelling generation ...", flush=True)
+            gen_thread.join(timeout=2.0)
+            return 7
+        gen_thread.join()
     else:
-        print(" ".join(str(int(t)) for t in outputs[0].tolist()))
-    print("  " + "=" * 60)
+        # Fallback: blocking generate. Time it so the user has a signal.
+        with torch.no_grad():
+            try:
+                outputs = model.generate(**gen_kwargs)
+            except Exception as exc:
+                print(f"  generate raised: {type(exc).__name__}: {exc}")
+                return 5
+        if tokenizer is not None:
+            print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+        else:
+            print(" ".join(str(int(t)) for t in outputs[0].tolist()))
+
+    elapsed = time.perf_counter() - t_start
+    print(f"\n  --- done in {elapsed:6.1f}s ---")
+
+    # ------------------------------------------------------------------
+    # Step 5: resolved-backend summary
+    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Step 5: resolved-backend summary
