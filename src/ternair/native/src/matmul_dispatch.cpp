@@ -1,119 +1,80 @@
-// ==========================================================================
-// matmul_dispatch.cpp  —  CPU feature detection + dispatch
-// ==========================================================================
-// At load time, pick the best ternary matmul backend available on the
-// host.  Each backend implements the same signature; the dispatcher
-// routes ternair_ternary_matmul() to the right one.
-// ==========================================================================
-
-#include "ternair/ternair_runtime.h"
-
+/**
+ * matmul_dispatch.cpp — Runtime ISA dispatcher
+ *
+ * Selects the fastest available matmul kernel at runtime:
+ *   AVX-512 > AVX-2 > scalar
+ * Detection is done once at library load time via CPUID.
+ */
+#include "ternair_native.h"
+#include <cstdint>
 #include <cstring>
 
-extern "C" int ternair_ternary_matmul_scalar(
-    const uint8_t* packed, int M, int Kp,
-    const uint16_t* x_fp16_bits, int N,
-    const float* gamma,
-    uint16_t* out_fp16_bits);
-
-#if defined(__AVX__) && defined(__F16C__)
-extern "C" int ternair_ternary_matmul_avx2(
-    const uint8_t* packed, int M, int Kp,
-    const uint16_t* x_fp16_bits, int N,
-    const float* gamma,
-    uint16_t* out_fp16_bits);
+#if defined(_MSC_VER)
+  #include <intrin.h>
+  #define CPUID(regs, leaf) __cpuid((int*)(regs), (leaf))
+#elif defined(__GNUC__) || defined(__clang__)
+  #include <cpuid.h>
+  static inline void CPUID(uint32_t regs[4], uint32_t leaf) {
+      __cpuid_count(leaf, 0, regs[0], regs[1], regs[2], regs[3]);
+  }
+#else
+  static inline void CPUID(uint32_t regs[4], uint32_t leaf) {
+      memset(regs, 0, 16);
+  }
 #endif
 
-#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512DQ__)
-extern "C" int ternair_ternary_matmul_avx512(
-    const uint8_t* packed, int M, int Kp,
-    const uint16_t* x_fp16_bits, int N,
-    const float* gamma,
-    uint16_t* out_fp16_bits);
-#endif
+namespace ternair {
 
+enum class ISA { SCALAR, AVX2, AVX512 };
 
-// ---------------------------------------------------------------------------
-// CPU feature detection (x86-64)
-// ---------------------------------------------------------------------------
-
-#if defined(__x86_64__) || defined(_M_X64)
-#  if defined(_MSC_VER)
-#    include <intrin.h>
-#  else
-#    include <cpuid.h>
-#  endif
-
-static void cpuid(int info[4], int leaf, int sub) {
-#  if defined(_MSC_VER)
-    __cpuidex(info, leaf, sub);
-#  else
-    __cpuid_count(leaf, sub, info[0], info[1], info[2], info[3]);
-#  endif
+static ISA detect_isa() {
+    uint32_t regs[4] = {0};
+    CPUID(regs, 1);
+    bool has_avx  = (regs[2] >> 28) & 1;
+    CPUID(regs, 7);
+    bool has_avx2   = (regs[1] >> 5)  & 1;
+    bool has_avx512 = (regs[1] >> 16) & 1;
+    if (has_avx && has_avx2 && has_avx512) return ISA::AVX512;
+    if (has_avx && has_avx2)               return ISA::AVX2;
+    return ISA::SCALAR;
 }
 
-static int has_avx512f() {
-    int info[4];
-    cpuid(info, 7, 0);
-    // Bit 16 of EBX = AVX-512F
-    return (info[1] >> 16) & 1;
-}
-static int has_avx2() {
-    int info[4];
-    cpuid(info, 7, 0);
-    // Bit 5 of EBX = AVX2
-    return (info[1] >> 5) & 1;
-}
-static int has_f16c() {
-    int info[4];
-    cpuid(info, 1, 0);
-    // Bit 29 of ECX = F16C
-    return (info[2] >> 29) & 1;
-}
-#endif
+static const ISA g_isa = detect_isa();
 
+// Forward declarations
+void matmul_scalar(const uint8_t*, const float*, const float*, float*, int, int);
 
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
+// Weak symbols for optional SIMD backends (linked in if compiled)
+__attribute__((weak))
+void matmul_avx2(const uint8_t*, const float*, const float*, float*, int, int) {
+    matmul_scalar(nullptr, nullptr, nullptr, nullptr, 0, 0);
+}
+__attribute__((weak))
+void matmul_avx512(const uint8_t*, const float*, const float*, float*, int, int) {
+    matmul_scalar(nullptr, nullptr, nullptr, nullptr, 0, 0);
+}
 
-extern "C" int ternair_ternary_matmul(
-    const uint8_t* packed, int M, int Kp,
-    const uint16_t* x_fp16_bits, int N,
-    const float* gamma,
-    uint16_t* out_fp16_bits
+void matmul_dispatch(
+    const uint8_t* packed,
+    const float*   x,
+    const float*   gamma,
+    float*         out,
+    int out_f,
+    int in_f
 ) {
-#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512DQ__)
-    if (has_avx512f()) {
-        return ternair_ternary_matmul_avx512(
-            packed, M, Kp, x_fp16_bits, N, gamma, out_fp16_bits);
-    }
-#endif
-#if defined(__AVX__) && defined(__F16C__)
-    if (has_avx2() && has_f16c()) {
-        return ternair_ternary_matmul_avx2(
-            packed, M, Kp, x_fp16_bits, N, gamma, out_fp16_bits);
-    }
-#endif
-    return ternair_ternary_matmul_scalar(
-        packed, M, Kp, x_fp16_bits, N, gamma, out_fp16_bits);
-}
-
-
-extern "C" int ternair_backend_name_(int backend) {
-    switch (backend) {
-        case TERNAIR_BACKEND_AVX512: return 2;
-        case TERNAIR_BACKEND_AVX2:    return 1;
-        case TERNAIR_BACKEND_SCALAR:
-        default:                       return 0;
+    switch (g_isa) {
+        case ISA::AVX512: matmul_avx512(packed, x, gamma, out, out_f, in_f); break;
+        case ISA::AVX2:   matmul_avx2  (packed, x, gamma, out, out_f, in_f); break;
+        default:          matmul_scalar(packed, x, gamma, out, out_f, in_f); break;
     }
 }
 
-extern "C" const char* ternair_backend_name(int backend) {
-    switch (backend) {
-        case TERNAIR_BACKEND_AVX512: return "avx512";
-        case TERNAIR_BACKEND_AVX2:    return "avx2";
-        case TERNAIR_BACKEND_SCALAR:
-        default:                       return "scalar";
+const char* isa_name() {
+    switch (g_isa) {
+        case ISA::AVX512: return "avx512";
+        case ISA::AVX2:   return "avx2";
+        default:          return "scalar";
     }
 }
+
+} // namespace ternair
