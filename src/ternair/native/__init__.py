@@ -39,15 +39,26 @@ from typing import Optional, Sequence
 # ---------------------------------------------------------------------------
 
 def _find_library() -> Optional[str]:
-    """Locate libternair_native.so in common build locations + LD_LIBRARY_PATH."""
+    """Locate libternair_native.{so,dll,dylib} in common build locations."""
     env_path = os.environ.get("TERNAIR_NATIVE_LIB")
     if env_path and os.path.exists(env_path):
         return env_path
-    # Walk the package tree.
     here = os.path.dirname(os.path.abspath(__file__))
+    # Walk the package tree.  Naming conventions differ across toolchains:
+    #   * Linux g++ (scripts/build.sh)        -> libternair_native.so
+    #   * Windows g++ mingw / MSYS2           -> ternair_native.dll  (THIS is the
+    #                                            case the previous candidate list
+    #                                            was missing -> available() was
+    #                                            wrongly returning False)
+    #   * macOS g++ / clang                   -> libternair_native.dylib
+    #   * MSVC CMake multi-config              -> ternair_native.dll under
+    #                                            build/Release or build/Debug
     candidates = [
         os.path.join(here, "build", "libternair_native.so"),
+        os.path.join(here, "build", "ternair_native.dll"),
+        os.path.join(here, "build", "libternair_native.dylib"),
         os.path.join(here, "build", "ternair_native.so"),
+        os.path.join(here, "build", "ternair_native"),
         os.path.join(here, "build", "Release", "ternair_native.dll"),
         os.path.join(here, "build", "Debug", "ternair_native.dll"),
     ]

@@ -31,19 +31,40 @@ INC="-I$ROOT/include"
 
 # Auto-detect AVX-512F+AVX-512BW+AVX-512DQ
 CPUFLAGS=""
-if [[ "$(uname -m)" == "x86_64" ]]; then
-    if grep -q -E '^flags.*(avx512f|avx512dq)' /proc/cpuinfo 2>/dev/null; then
-        CPUFLAGS="-mavx512f -mavx512bw -mavx512dq -mavx2 -mf16c -mfma"
-        echo "[build.sh] AVX-512F+BW+DQ ENABLED"
-    elif grep -q -E '^flags.*avx2' /proc/cpuinfo 2>/dev/null; then
+case "$(uname -s)" in
+    MINGW*|CYGWIN*|MSYS*)
+        # Windows mingw: /proc/cpuinfo unavailable.  All x86_64 systems
+        # since Haswell (2013) support AVX2 + F16C + FMA, so default to it.
         CPUFLAGS="-mavx2 -mf16c -mfma"
-        echo "[build.sh] AVX2 + F16C + FMA ENABLED"
-    else
-        echo "[build.sh] SCALAR only (no AVX2 detected)"
-    fi
-else
-    echo "[build.sh] non-x86_64 host -- SCALAR only"
-fi
+        echo "[build.sh] Windows mingw: AVX2 + F16C + FMA ENABLED (default)"
+        ;;
+    *)
+        if [[ "$(uname -m)" == "x86_64" ]]; then
+            if grep -q -E '^flags.*(avx512f|avx512dq)' /proc/cpuinfo 2>/dev/null; then
+                CPUFLAGS="-mavx512f -mavx512bw -mavx512dq -mavx2 -mf16c -mfma"
+                echo "[build.sh] AVX-512F+BW+DQ ENABLED"
+            elif grep -q -E '^flags.*avx2' /proc/cpuinfo 2>/dev/null; then
+                CPUFLAGS="-mavx2 -mf16c -mfma"
+                echo "[build.sh] AVX2 + F16C + FMA ENABLED"
+            else
+                echo "[build.sh] SCALAR only (no AVX2 detected)"
+            fi
+        else
+            echo "[build.sh] non-x86_64 host -- SCALAR only"
+        fi
+        ;;
+esac
+
+# Windows mingw: -shared by itself does NOT populate the .dll export table.
+# Without -Wl,--export-all-symbols the resulting DLL loads but every
+# ternair_* symbol is hidden -> ctypes.LoadLibrary succeeds then
+# "function 'ternair_create' not found" at first attribute lookup.
+EXTRA_LDFLAGS=""
+case "$(uname -s)" in
+    MINGW*|CYGWIN*|MSYS*)
+        EXTRA_LDFLAGS="-Wl,--export-all-symbols"
+        ;;
+esac
 
 # Sources (matmul_avx512.cpp requires AVX-512; matmul_avx2.cpp requires AVX2+F16C)
 LIB_SOURCES=(
@@ -64,8 +85,8 @@ fi
 
 # Library
 echo "[build.sh] compiling libternair_native.so..."
-"$CXX" $CXXFLAGS_LIB $CPUFLAGS $INC -shared -o "$BUILD_DIR/libternair_native.so" \
-    "${LIB_SOURCES[@]}" -lpthread
+"$CXX" $CXXFLAGS_LIB $CPUFLAGS $EXTRA_LDFLAGS $INC -shared \
+    -o "$BUILD_DIR/libternair_native.so" "${LIB_SOURCES[@]}" -lpthread
 
 # CLI
 echo "[build.sh] compiling ternair_native_cli..."

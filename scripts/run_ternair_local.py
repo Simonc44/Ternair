@@ -156,9 +156,23 @@ def _has_gxx() -> str | None:
 
 
 def _cpu_features(gxx: str) -> str:
-    """Return the g++ ISA flags appropriate for this CPU."""
-    if not IS_LINUX and not IS_WINDOWS:
-        return ""  # macOS Clang behaves a bit differently; keep it simple.
+    """Return the g++ ISA flags appropriate for this CPU.
+
+    On Windows / macOS, ``/proc/cpuinfo`` is unavailable so we cannot do a
+    precise feature probe.  Defaulting to ``-mavx2 -mf16c -mfma`` is safe
+    because every x86_64 CPU since Haswell (2013) supports the AVX2
+    family.  The C++ runtime in
+    ``src/ternair/native/src/matmul_dispatch.cpp`` does its own runtime
+    CPUID detection and silently falls back to scalar when called on a
+    machine without AVX2 -- so even if our compile-time assumption is
+    wrong on some exotic target, no crash, just slower code.
+
+    On Linux we read ``/proc/cpuinfo`` for AVX-512 detection.
+    """
+    if IS_WINDOWS or IS_MAC:
+        return "-mavx2 -mf16c -mfma"
+    if not IS_LINUX:
+        return ""
     if shutil.which("grep") is None:
         return ""
     try:
@@ -197,11 +211,19 @@ def build_native_engine(gxx: str, *, verbose: bool = True) -> Path:
 
     common_flags = [
         "-std=c++17", "-O3", "-fPIC",
-        "-fvisibility=default",  # CRITICAL for ctypes to resolve symbols
+        "-fvisibility=default",  # ELF: makes all symbols candidate-exportable
         "-Wall", "-Wextra", "-DNDEBUG",
     ]
     if cpu_flags:
         common_flags += cpu_flags.split()
+    # CRITICAL on Windows mingw / MSYS2: -fvisibility=default is an ELF
+    # concept only.  ``g++ -shared`` on MinGW does NOT auto-populate the
+    # .dll export table; ctypes.LoadLibrary() would succeed and then
+    # raise ``AttributeError: function 'ternair_create' not found`` at
+    # first attribute lookup.  -Wl,--export-all-symbols forces every
+    # extern "C" symbol into the export table.
+    if IS_WINDOWS:
+        common_flags.append("-Wl,--export-all-symbols")
 
     cmd = [
         gxx, *common_flags, "-shared",
