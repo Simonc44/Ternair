@@ -64,6 +64,11 @@ from ternair.model import (
     tiny_profile,
     unpack_2bit,
 )
+from ternair.model.bitnet_converter import (
+    ConvertReport,
+    convert_bitnet_checkpoint,
+    load_converted_model,
+)
 from ternair.benchmark.size import (
     SizeBreakdown,
     auto_fit_to_bytes,
@@ -124,6 +129,10 @@ __all__ = [
     "one_gb_profile",
     "tiny_profile",
     "unpack_2bit",
+    # bitnet converter
+    "ConvertReport",
+    "convert_bitnet_checkpoint",
+    "load_converted_model",
     # benchmark
     "SizeBreakdown",
     "auto_fit_to_bytes",

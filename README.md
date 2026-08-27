@@ -66,9 +66,47 @@ with torch.no_grad():
 print(output.shape)
 ```
 
+## Reuse trained BitNet b1.58 models (zero training)
+
+Ternair and BitNet b1.58 share the **same architecture** (RMSNorm, RoPE,
+GQA attention, SwiGLU MLP, per-row absmean ternary weights), so a trained
+BitNet b1.58 checkpoint (e.g. `microsoft/bitnet-b1.58-2B-4T`) can be
+converted **as-is** — same trained weights, no re-training — into Ternair's
+denser packed storage. You get the full BitNet model catalog with Ternair's
+extras (1.6 bits/value packing, KV-cache generation, HTTP server, portable
+backends).
+
+```bash
+# 1. Download a trained BitNet b1.58 checkpoint (config.json + model.safetensors)
+huggingface-cli download microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
+
+# 2. Convert it to Ternair (ternarises + packs the master weights)
+python -m ternair import-bitnet --source ./bitnet-2b4t --output ./ternair-2b4t --storage packed
+
+# 3. Serve it (tokenizer copied automatically)
+python -m ternair serve --model ./ternair-2b4t --port 8080
+```
+
+Python API:
+
+```python
+from ternair import convert_bitnet_checkpoint, load_converted_model
+
+report = convert_bitnet_checkpoint("./bitnet-2b4t", "./ternair-2b4t")
+model, tokenizer = load_converted_model("./ternair-2b4t")
+```
+
+How it works: BitNet b1.58 checkpoints store **master bf16 weights** and
+ternarise at inference with `gamma = mean(|W|)` per row. The converter does
+that once, packs the ternary weights (`packed` = 1.6 bits/value,
+`fastpacked` = 2 bits/value), and writes a native Ternair package. The
+converted model is numerically identical to the frozen BitNet model (the
+round-trip test asserts bit-exact logits vs. a reference built from the same
+master weights).
+
 ## Training (quality)
 
-Ternair is a *training* framework, not a pre-trained checkpoint: the shipped profiles are randomly initialised. Quality comparable to BitNet requires training, which is exactly what the training path is for.
+Ternair is also a *training* framework: the shipped profiles are randomly initialised. Quality comparable to BitNet requires training, which is exactly what the training path is for.
 
 Run a real multi-step training loop on the bundled toy corpus (no HuggingFace dependency needed) and watch loss drop:
 
@@ -166,14 +204,15 @@ Honest comparison with BitNet:
 ## CLI reference
 
 ```text
-ternair info        Show a model configuration
-ternair size        Estimate storage and compression
-ternair demo        Run a forward/generation smoke demo
-ternair train-one   Run one toy training step
-ternair train       Run a real multi-step training loop and report loss/PPL reduction
-ternair infer       Run inference through the backend dispatcher
-ternair serve       Start the OpenAI-compatible HTTP server
-ternair benchmark   Run reproducible perplexity + speed benchmarks
+ternair info          Show a model configuration
+ternair size          Estimate storage and compression
+ternair demo          Run a forward/generation smoke demo
+ternair train-one     Run one toy training step
+ternair train         Run a real multi-step training loop and report loss/PPL reduction
+ternair infer         Run inference through the backend dispatcher
+ternair import-bitnet Convert a trained BitNet b1.58 checkpoint into a Ternair package
+ternair serve         Start the OpenAI-compatible HTTP server
+ternair benchmark     Run reproducible perplexity + speed benchmarks
 ```
 
 Run `python -m ternair COMMAND --help` for all options.

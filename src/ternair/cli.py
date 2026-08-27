@@ -179,6 +179,40 @@ def _train(args: argparse.Namespace) -> int:
     return 1
 
 
+def _import_bitnet(args: argparse.Namespace) -> int:
+    """Convert a trained BitNet b1.58 HF checkpoint into a Ternair package.
+
+    This is the "same catalog, zero training" path: the master bf16 weights
+    of an official BitNet b1.58 model are ternarised + packed with Ternair's
+    denser storage, producing a fully-trained model usable by ``ternair``
+    (server, CLI, KV-cache generation).
+    """
+    from ternair.model.bitnet_converter import convert_bitnet_checkpoint
+
+    report = convert_bitnet_checkpoint(
+        source_dir=args.source,
+        output_dir=args.output,
+        storage=_storage(args),
+        copy_tokenizer=not args.no_tokenizer,
+    )
+    d = report.as_dict()
+    print("BitNet -> Ternair conversion complete")
+    print(f"  source              : {d['source']}")
+    print(f"  output              : {d['output_dir']}")
+    print(f"  storage             : {d['storage']}")
+    print(f"  layers              : {d['n_layers']}")
+    print(f"  ternary params      : {d['n_ternary_params']:,}")
+    print(f"  tensors loaded      : {d['n_loaded_tensors']}")
+    print(f"  tensors ignored     : {d['n_ignored_tensors']}")
+    print(f"  size                : {d['size_mib']:.2f} MiB  "
+          f"(FP16 equivalent: {d['fp16_equivalent_mib']:.2f} MiB)")
+    if d["ignored_keys"]:
+        print(f"  ignored keys        : {d['ignored_keys']}")
+    print()
+    print(f"Load it with:  python -m ternair serve --model {args.output}")
+    return 0
+
+
 def _serve(args: argparse.Namespace) -> int:
     """Start the HTTP inference server."""
     import logging
@@ -189,6 +223,7 @@ def _serve(args: argparse.Namespace) -> int:
         host=args.host,
         port=args.port,
         storage=_storage(args, fallback="fastpacked"),
+        model_dir=args.model,
     )
     return 0
 
@@ -364,6 +399,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_infer.set_defaults(func=_infer)
 
+    p_import = sub.add_parser(
+        "import-bitnet",
+        parents=[common],
+        help=(
+            "Convert a trained BitNet b1.58 HuggingFace checkpoint into a "
+            "Ternair package (same trained weights, denser storage)."
+        ),
+    )
+    p_import.add_argument("--source", required=True, help="Dir with config.json + model.safetensors")
+    p_import.add_argument("--output", required=True, help="Where to write the Ternair package")
+    p_import.add_argument("--no-tokenizer", action="store_true", help="Skip copying tokenizer files")
+    p_import.set_defaults(func=_import_bitnet)
+
     p_serve = sub.add_parser(
         "serve",
         parents=[common],
@@ -371,6 +419,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_serve.add_argument("--host", default="0.0.0.0", help="Bind address.")
     p_serve.add_argument("--port", type=int, default=8080, help="Bind port.")
+    p_serve.add_argument(
+        "--model", default=None,
+        help="Path to a converted BitNet / native Ternair package to serve instead of a random profile.",
+    )
     p_serve.set_defaults(func=_serve)
 
     p_bench = sub.add_parser(

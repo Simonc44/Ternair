@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import threading
 import uuid
@@ -101,12 +102,23 @@ class _InferenceEngine:
         model: TernairForCausalLM,
         device: str = "cpu",
         max_batch_workers: int = 4,
+        tokenizer=None,
+        model_name: str = "ternair",
     ) -> None:
         self.model = model
         self.device = device
-        self.model_name = "ternair"
+        self.model_name = model_name
+        self._tokenizer = tokenizer
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=max_batch_workers)
+
+    def _get_tokenizer(self):
+        """Return the engine tokenizer (HF tokenizer or toy CharTokenizer)."""
+        if self._tokenizer is not None:
+            return self._tokenizer
+        from ternair.training.data import CharTokenizer, DEFAULT_CORPUS
+
+        return CharTokenizer(DEFAULT_CORPUS)
 
     # ---- single request ---------------------------------------------------
 
@@ -120,9 +132,7 @@ class _InferenceEngine:
         top_p: float = 0.9,
         repetition_penalty: float = 1.1,
     ) -> dict[str, Any]:
-        from ternair.training.data import CharTokenizer, DEFAULT_CORPUS
-
-        tok = CharTokenizer(DEFAULT_CORPUS)
+        tok = self._get_tokenizer()
         ids = torch.tensor(
             [tok.bos_id] + tok.encode(prompt), dtype=torch.long
         ).unsqueeze(0).to(self.device)
@@ -340,8 +350,42 @@ def serve(
     port: int = 8080,
     storage: str = "fastpacked",
     max_batch_workers: int = 4,
+    model_dir: str | None = None,
 ) -> None:
-    """Start the Ternair HTTP server (blocking)."""
+    """Start the Ternair HTTP server (blocking).
+
+    Parameters
+    ----------
+    model_dir
+        Optional path to a converted BitNet / native Ternair package
+        (``config.json`` + ``model.safetensors``).  When given, the server
+        loads that fully-trained model instead of building a random
+        profile.  Its tokenizer is used automatically when present.
+    """
+    if model_dir is not None:
+        from ternair.model.bitnet_converter import load_converted_model
+
+        _LOGGER.info("Loading converted model from %s ...", model_dir)
+        model, tokenizer = load_converted_model(model_dir)
+        model.freeze_storage()
+        model.eval()
+        model_name = os.path.basename(model_dir.rstrip("/\\")) or "ternair"
+        _LOGGER.info("Model ready. Starting server on %s:%d", host, port)
+        engine = _InferenceEngine(
+            model, max_batch_workers=max_batch_workers,
+            tokenizer=tokenizer, model_name=model_name,
+        )
+        metrics = _Metrics()
+        _Handler.engine = engine
+        _Handler.metrics = metrics
+        server = HTTPServer((host, port), _Handler)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            _LOGGER.info("Shutting down.")
+            server.shutdown()
+        return
+
     from ternair.model.size_profiles import PROFILE_REGISTRY
 
     profile_fn = PROFILE_REGISTRY.get(profile_name)

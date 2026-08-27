@@ -27,6 +27,7 @@ nav:
   - Home: index.md
   - API Reference: api.md
   - CLI Reference: cli.md
+  - BitNet Conversion: bitnet.md
   - Server Guide: server.md
   - Benchmarks: benchmarks.md
 
