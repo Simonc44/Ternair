@@ -46,8 +46,12 @@ jobs:
           python -m pip install transformers safetensors huggingface_hub datasets
 
       - name: Download BitNet checkpoint
+        # `hf` is the current CLI; `huggingface-cli` was removed in
+        # huggingface_hub >= 1.0 (it only prints a deprecation warning and
+        # exits non-zero).  Try `hf` first, fall back for old versions.
         run: |
-          huggingface-cli download "${{ inputs.model_id }}" --local-dir ./bitnet-checkpoint
+          hf download "${{ inputs.model_id }}" --local-dir ./bitnet-checkpoint \
+            || huggingface-cli download "${{ inputs.model_id }}" --local-dir ./bitnet-checkpoint
           ls -la ./bitnet-checkpoint | head -20
 
       - name: Convert with Ternair

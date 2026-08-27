@@ -2,7 +2,8 @@
 """Verify a converted BitNet b1.58 checkpoint against the HF reference.
 
 Workflow:
-1. (optional) download the checkpoint with ``huggingface-cli``;
+1. (optional) download the checkpoint with ``hf download`` (or
+   ``huggingface-cli`` on huggingface_hub < 1.0);
 2. convert it with Ternair (``convert_bitnet_checkpoint``);
 3. load the HF reference with ``transformers`` (master bf16 weights);
 4. compare logits: Pearson correlation + top-1 agreement;

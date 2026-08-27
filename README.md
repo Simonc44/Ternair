@@ -78,7 +78,7 @@ backends).
 
 ```bash
 # 1. Download a trained BitNet b1.58 checkpoint (config.json + model.safetensors)
-huggingface-cli download microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
+hf download microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
 
 # 2. Convert it to Ternair (ternarises + packs the master weights)
 python -m ternair import-bitnet --source ./bitnet-2b4t --output ./ternair-2b4t --storage packed
@@ -120,7 +120,7 @@ the trained-model path end-to-end on the **real** `microsoft/bitnet-b1.58-2B-4T`
 Run it locally:
 
 ```bash
-huggingface-cli download microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
+hf download microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
 python scripts/verify_bitnet_parity.py --source ./bitnet-2b4t --output ./ternair-2b4t
 python scripts/bench_vs_bitnet.py --source ./bitnet-2b4t --output ./ternair-2b4t
 ```

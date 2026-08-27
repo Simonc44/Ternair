@@ -21,7 +21,7 @@ time. The converter performs that ternarisation once and packs the result.
 
 ```bash
 # Download a trained checkpoint (config.json + model.safetensors)
-huggingface-cli download microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
+hf download microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
 
 # Convert
 python -m ternair import-bitnet --source ./bitnet-2b4t --output ./ternair-2b4t --storage packed
