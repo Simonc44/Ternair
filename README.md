@@ -5,7 +5,7 @@
 Ternair loads [Microsoft BitNet b1.58](https://arxiv.org/abs/2402.17764) models — including the real `2B-4T` — and serves them behind an OpenAI-compatible API in a single `pip install`.
 
 ```bash
-pip install ternair
+pip install git+https://github.com/Simonc44/Ternair
 ternair serve --model microsoft/bitnet-b1.58-2B-4T --port 8080
 # → http://localhost:8080/v1/chat/completions  (OpenAI-compatible)
 ```
@@ -33,7 +33,7 @@ ternair serve --model microsoft/bitnet-b1.58-2B-4T --port 8080
 ### Install
 
 ```bash
-pip install ternair
+pip install git+https://github.com/Simonc44/Ternair
 ```
 
 ### Serve a real BitNet model
