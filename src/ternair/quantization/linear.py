@@ -113,6 +113,10 @@ class TernairLinear(nn.Module):
 
         self._packed_shape: tuple[int, int] | None = None
         self._pack_kind: StorageMode | None = None
+        # Cached dequantised weight (torch backend) + cached NumPy packed
+        # rows (numpy backend).  Both are invalidated on device moves.
+        self._dequantised_cache: Tensor | None = None
+        self._numpy_cache: dict | None = None
 
         # --- FIX: explicit device tracking instead of next(self.parameters()) ---
         # Set at freeze_storage() time; updated via .to() / .cuda() / .cpu().
@@ -138,20 +142,27 @@ class TernairLinear(nn.Module):
     # ------------------------------------------------------------------
     # Device tracking - keep _frozen_device in sync with module moves
     # ------------------------------------------------------------------
+    def _invalidate_caches(self) -> None:
+        self._dequantised_cache = None
+        self._numpy_cache = None
+
     def to(self, *args: Any, **kwargs: Any) -> "TernairLinear":
         result = super().to(*args, **kwargs)
         # Infer the target device from the moved gamma_eval buffer.
         result._frozen_device = result.gamma_eval.device
+        result._invalidate_caches()
         return result
 
     def cuda(self, device=None) -> "TernairLinear":  # type: ignore[override]
         result = super().cuda(device)
         result._frozen_device = result.gamma_eval.device
+        result._invalidate_caches()
         return result
 
     def cpu(self) -> "TernairLinear":  # type: ignore[override]
         result = super().cpu()
         result._frozen_device = result.gamma_eval.device
+        result._invalidate_caches()
         return result
 
     def _get_device(self) -> torch.device:
@@ -225,6 +236,7 @@ class TernairLinear(nn.Module):
         trits, gamma = self.ternarize_parameter()
         self.gamma_eval.copy_(gamma.detach().squeeze(-1).to(torch.float32))
         self._packed_shape = tuple(trits.shape)
+        self._invalidate_caches()
 
         if self.storage == MODE_INT8:
             self.packed_weight = trits.detach().to(torch.int8).flatten().contiguous()
@@ -453,11 +465,19 @@ class TernairLinear(nn.Module):
         Uses ``_frozen_device`` (set at :meth:`freeze_storage` and kept in sync
         via :meth:`to`) - never calls ``next(self.parameters())`` which would
         crash on fully-frozen modules with no FP params left.
+
+        The result is cached: packed weights are immutable after
+        :meth:`freeze_storage`, so we unpack once and reuse the FP tensor
+        for every subsequent forward.  This removes the per-call unpack
+        cost that dominated CPU decode latency.
         """
         if self._pack_kind is None or self._packed_shape is None:
             raise RuntimeError(
                 "Call freeze_storage() before using the ternarised forward."
             )
+
+        if self._dequantised_cache is not None:
+            return self._dequantised_cache.to(dtype=dtype)
 
         device = self._get_device()
 
@@ -474,9 +494,11 @@ class TernairLinear(nn.Module):
                 self.packed_weight.cpu().numpy(), shape=self._packed_shape
             ).to(device=device)
 
-        gamma = self.gamma_eval.to(dtype=dtype, device=device).unsqueeze(-1)
-        trits_tensor = trits_flat.to(dtype=dtype).reshape(self._packed_shape)
-        return trits_tensor * gamma
+        gamma = self.gamma_eval.to(dtype=torch.float32, device=device).unsqueeze(-1)
+        trits_tensor = trits_flat.to(dtype=torch.float32).reshape(self._packed_shape)
+        cached = (trits_tensor * gamma).contiguous()
+        self._dequantised_cache = cached
+        return cached.to(dtype=dtype)
 
     def forward(self, x: Tensor) -> Tensor:
         if self.training or self._pack_kind is None:

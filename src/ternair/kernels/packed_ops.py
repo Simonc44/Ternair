@@ -1,7 +1,9 @@
-"""Pure‑Python / NumPy reference for the packed ternary matmul.
+"""Pure-Python / NumPy reference for the packed ternary matmul.
 
 These functions show the *algorithm* that the GPU and CPU SIMD kernels
-implement.  They are intentionally simple and readable.
+implement.  The implementation is fully vectorised: the packed bytes
+are decoded into the ``{-1, 0, +1}`` weight matrix once (via the 256-entry
+LUT), then the output is a single ``np.matmul`` call.
 """
 
 from __future__ import annotations
@@ -13,11 +15,7 @@ from ternair.kernels.packing_fast import TRIT_LUT
 
 
 def decode_fastpacked_row(packed_row: NDArray[np.uint8], N: int) -> NDArray[np.int8]:
-    """Decode a single packed fastpacked row to ``{-1, 0, +1}``.
-
-    Equivalent to :func:`~ternair.kernels.packing_fast.unpack_trits_2bit`
-    but uses the LUT for maximum Python speed.
-    """
+    """Decode a single packed fastpacked row to ``{-1, 0, +1}``."""
     Kp = len(packed_row)
     trits = np.zeros(N, dtype=np.int8)
     for kp in range(Kp):
@@ -29,12 +27,22 @@ def decode_fastpacked_row(packed_row: NDArray[np.uint8], N: int) -> NDArray[np.i
     return trits
 
 
+def unpack_fastpacked_matrix(packed: NDArray[np.uint8]) -> NDArray[np.int8]:
+    """Decode an ``(M, Kp)`` packed matrix into ``(M, Kp*4)`` trits.
+
+    Fully vectorised: ``TRIT_LUT[packed]`` gives ``(M, Kp, 4)`` in one
+    NumPy index, then a reshape produces the row-major trit matrix.
+    """
+    lut = np.asarray(TRIT_LUT, dtype=np.int8)  # (256, 4)
+    return lut[packed].reshape(packed.shape[0], packed.shape[1] * 4)
+
+
 def ternary_matmul_numpy(
     packed: NDArray[np.uint8],
     x: NDArray[np.float16],
     gamma: NDArray[np.float32],
 ) -> NDArray[np.float16]:
-    """One‑off ``y = γ · (W_t · x)``  —  single batch, CPU‑only.
+    """One-off ``y = gamma * (W_t @ x)`` -- single batch, CPU-only.
 
     Parameters
     ----------
@@ -43,33 +51,17 @@ def ternary_matmul_numpy(
     x : (N,) float16
         Input activation vector.
     gamma : (M,) float32
-        Per‑output scaling factor.
+        Per-output scaling factor.
 
     Returns
     -------
     y : (M,) float16
         Output activations.
     """
-    M = packed.shape[0]
     N = len(x)
-    Kp = packed.shape[1]
-    out = np.zeros(M, dtype=np.float32)
-    for m in range(M):
-        acc = 0.0
-        for kp in range(Kp):
-            byte = int(packed[m, kp])
-            t0, t1, t2, t3 = TRIT_LUT[byte].tolist()
-            n0 = kp * 4
-            if t0:
-                acc += t0 * float(x[n0])
-            if t1 and n0 + 1 < N:
-                acc += t1 * float(x[n0 + 1])
-            if t2 and n0 + 2 < N:
-                acc += t2 * float(x[n0 + 2])
-            if t3 and n0 + 3 < N:
-                acc += t3 * float(x[n0 + 3])
-        out[m] = acc * float(gamma[m])
-    return out.astype(np.float16)
+    W = unpack_fastpacked_matrix(packed)[:, :N]  # (M, N)
+    y = (W.astype(np.float32) @ x.astype(np.float32)) * gamma.astype(np.float32)
+    return y.astype(np.float16)
 
 
 def ternary_matmul_numpy_batched(
@@ -77,34 +69,22 @@ def ternary_matmul_numpy_batched(
     x_batch: NDArray[np.float16],
     gamma: NDArray[np.float32],
 ) -> NDArray[np.float16]:
-    """Batched version — ``(B, N)`` inputs, ``(B, M)`` outputs.
+    """Batched version -- ``(B, N)`` inputs, ``(B, M)`` outputs.
 
-    For a transformer *per‑token* the batch dimension is the sequence
-    length.  We loop over the batch for readability; Triton will fuse.
+    The weight matrix is decoded once and reused for the whole batch;
+    the batched matmul is a single BLAS call.
     """
     B, N = x_batch.shape
-    M = packed.shape[0]
-    Kp = packed.shape[1]
-    out = np.zeros((B, M), dtype=np.float32)
-    for b in range(B):
-        x = x_batch[b]
-        for m in range(M):
-            acc = 0.0
-            for kp in range(Kp):
-                byte = int(packed[m, kp])
-                t = TRIT_LUT[byte]
-                n0 = kp * 4
-                if t[0]:
-                    acc += t[0] * float(x[n0])
-                for p in range(1, 4):
-                    if t[p] and n0 + p < N:
-                        acc += t[p] * float(x[n0 + p])
-            out[b, m] = acc * float(gamma[m])
-    return out.astype(np.float16)
+    W = unpack_fastpacked_matrix(packed)[:, :N]  # (M, N)
+    y = (
+        W.astype(np.float32) @ x_batch.astype(np.float32).T
+    ).T * gamma.astype(np.float32)  # (B, M)
+    return y.astype(np.float16)
 
 
 __all__ = [
     "decode_fastpacked_row",
+    "unpack_fastpacked_matrix",
     "ternary_matmul_numpy",
     "ternary_matmul_numpy_batched",
 ]
