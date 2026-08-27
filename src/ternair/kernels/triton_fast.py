@@ -151,7 +151,7 @@ def ternary_matmul_triton(
     # ------------------------------------------------------------------
     # Decide which path: torch-Triton OR numpy-fallback
     # ------------------------------------------------------------------
-    use_triton = bool(has_triton() and device == "cuda")
+    use_triton = bool(has_triton() and str(device).startswith("cuda"))
     input_is_torch = _is_torch_tensor(x) or _is_torch_tensor(packed) or _is_torch_tensor(gamma)
 
     if not use_triton:

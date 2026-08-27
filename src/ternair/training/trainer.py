@@ -96,32 +96,47 @@ def train_one_epoch(
     log_interval_loss = 0.0
     best_loss = float("inf")
 
+    # Plain-torch fallback when ``accelerate`` is not installed.
+    no_accelerate = accelerator is None
+
     for step, batch in enumerate(dataloader):
         if global_step >= cfg.max_train_steps:
             break
 
         input_ids = batch["input_ids"]
-        with accelerator.accumulate(model):
+        grad_norm = 0.0
+        if no_accelerate:
             logits = model(input_ids)
             loss = cross_entropy(logits, input_ids)
-
-            accelerator.backward(loss)
-
-            if accelerator.sync_gradients:
-                grad_norm = clip_gradients(model, max_norm=cfg.max_grad_norm)
-                if grad_norm > cfg.max_grad_norm * 5:
-                    _LOGGER.warning(
-                        "Large grad norm at step %d: %.2f", global_step, grad_norm
-                    )
-
+            loss.backward()
+            grad_norm = clip_gradients(model, max_norm=cfg.max_grad_norm)
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
             optimizer.zero_grad()
+        else:
+            with accelerator.accumulate(model):
+                logits = model(input_ids)
+                loss = cross_entropy(logits, input_ids)
+
+                accelerator.backward(loss)
+
+                if accelerator.sync_gradients:
+                    grad_norm = clip_gradients(model, max_norm=cfg.max_grad_norm)
+                    if grad_norm > cfg.max_grad_norm * 5:
+                        _LOGGER.warning(
+                            "Large grad norm at step %d: %.2f", global_step, grad_norm
+                        )
+
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                optimizer.zero_grad()
 
         log_interval_loss += loss.item()
 
-        if global_step % cfg.log_every == 0 and accelerator.is_main_process:
+        is_main = True if no_accelerate else accelerator.is_main_process
+        if cfg.log_every > 0 and global_step % cfg.log_every == 0 and is_main:
             current_lr = optimizer.param_groups[0]["lr"] if optimizer.param_groups else 0.0
             avg_loss = log_interval_loss / max(cfg.log_every, 1)
             _LOGGER.info(
@@ -130,16 +145,16 @@ def train_one_epoch(
             )
             log_interval_loss = 0.0
 
-        if global_step % cfg.eval_every == 0 and global_step > 0:
+        if cfg.eval_every > 0 and global_step % cfg.eval_every == 0 and global_step > 0:
             eval_loss = evaluate(model, dataloader, cfg, accelerator)
             model.train()
-            if accelerator.is_main_process:
+            if is_main:
                 _LOGGER.info("eval step=%d  eval_loss=%.4f", global_step, eval_loss)
                 if eval_loss < best_loss:
                     best_loss = eval_loss
                     _save_checkpoint(model, optimizer, scheduler, global_step, cfg, tag="best")
 
-        if global_step % cfg.save_every == 0 and global_step > 0 and accelerator.is_main_process:
+        if cfg.save_every > 0 and global_step % cfg.save_every == 0 and global_step > 0 and is_main:
             _save_checkpoint(model, optimizer, scheduler, global_step, cfg, tag=f"step_{global_step}")
 
         global_step += 1
@@ -166,6 +181,7 @@ def evaluate(
         loss = cross_entropy(logits, input_ids)
         total_loss += loss.item()
         count += 1
+    model.train()
     return total_loss / max(count, 1)
 
 

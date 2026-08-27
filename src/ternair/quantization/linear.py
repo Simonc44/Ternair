@@ -145,6 +145,9 @@ class TernairLinear(nn.Module):
     def _invalidate_caches(self) -> None:
         self._dequantised_cache = None
         self._numpy_cache = None
+        # Backend resolution depends on the device (triton only on CUDA,
+        # cpu_cpp/numpy only on CPU), so re-resolve after any device move.
+        self._resolved_backend = None
 
     def to(self, *args: Any, **kwargs: Any) -> "TernairLinear":
         result = super().to(*args, **kwargs)

@@ -103,6 +103,82 @@ def _train_one(args: argparse.Namespace) -> int:
     return 0
 
 
+def _train(args: argparse.Namespace) -> int:
+    """Run a real multi-step training loop on the toy corpus and report
+    the loss reduction (quality check that the training path works)."""
+    import torch
+
+    from ternair.model.modeling import TernairForCausalLM
+    from ternair.training.config import TrainingConfig
+    from ternair.training.data import build_toy_dataloader, toy_corpus
+    from ternair.training.optimizer import create_optimizer
+    from ternair.training.scheduler import WSDScheduler
+    from ternair.training.trainer import train_one_epoch
+
+    torch.manual_seed(args.seed)
+    cfg = TrainingConfig(
+        model_profile=args.profile,
+        model_storage=_storage(args),
+        batch_size=args.batch_size,
+        max_train_steps=args.steps,
+        learning_rate=args.lr,
+        weight_decay=0.0,
+        gradient_accumulation_steps=1,
+        eval_every=args.eval_every,
+        eval_steps=2,
+        log_every=args.log_every,
+        save_every=0,
+        output_dir=args.output_dir,
+    )
+    model = TernairForCausalLM(
+        PROFILES[args.profile](storage=cfg.model_storage)
+    )
+    optimizer = create_optimizer(model, lr=cfg.learning_rate, weight_decay=0.0)
+    scheduler = WSDScheduler(
+        optimizer,
+        total_steps=cfg.total_steps,
+        warmup_steps=cfg.warmup_steps,
+        stable_steps=cfg.stable_steps,
+        decay_steps=cfg.decay_steps,
+        min_lr=cfg.learning_rate * cfg.min_lr_ratio,
+        decay_type=cfg.decay_type,  # type: ignore[arg-type]
+    )
+    dataloader = build_toy_dataloader(
+        text=toy_corpus(), n_sequences=args.n_sequences, batch_size=args.batch_size
+    )
+
+    # Loss before training (model is random).
+    model.eval()
+    with torch.no_grad():
+        first_batch = next(iter(dataloader))["input_ids"]
+        from ternair.training.trainer import cross_entropy
+        loss0 = float(cross_entropy(model(first_batch), first_batch).item())
+
+    # Run the real training loop without accelerate (plain PyTorch).
+    model.train()
+    final_step = train_one_epoch(
+        model=model,
+        dataloader=dataloader,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        cfg=cfg,
+        accelerator=None,
+    )
+
+    model.eval()
+    with torch.no_grad():
+        loss1 = float(cross_entropy(model(first_batch), first_batch).item())
+    ppl0, ppl1 = float(torch.exp(torch.tensor(loss0))), float(torch.exp(torch.tensor(loss1)))
+    print(f"profile={args.profile}  steps={final_step}  batch={args.batch_size}")
+    print(f"  loss   : {loss0:.4f} -> {loss1:.4f}  ({loss1 - loss0:+.4f})")
+    print(f"  ppl    : {ppl0:.2f} -> {ppl1:.2f}")
+    if final_step > 0 and loss1 < loss0:
+        print("  result : training path OK (loss reduced)")
+        return 0
+    print("  result : no measurable improvement (check LR / steps)", file=sys.stderr)
+    return 1
+
+
 def _serve(args: argparse.Namespace) -> int:
     """Start the HTTP inference server."""
     import logging
@@ -239,6 +315,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_train.add_argument("--lr", type=float, default=1e-3)
     p_train.set_defaults(func=_train_one)
+
+    p_train_full = sub.add_parser(
+        "train",
+        parents=[common],
+        help="Run a real multi-step training loop on the toy corpus and report loss/PPL reduction.",
+    )
+    p_train_full.add_argument("--steps", type=int, default=20)
+    p_train_full.add_argument("--lr", type=float, default=1e-3)
+    p_train_full.add_argument("--batch-size", type=int, default=8)
+    p_train_full.add_argument("--n-sequences", type=int, default=64)
+    p_train_full.add_argument("--eval-every", type=int, default=5)
+    p_train_full.add_argument("--log-every", type=int, default=5)
+    p_train_full.add_argument("--seed", type=int, default=42)
+    p_train_full.add_argument("--output-dir", default="checkpoints")
+    p_train_full.set_defaults(func=_train)
 
     p_infer = sub.add_parser(
         "infer",

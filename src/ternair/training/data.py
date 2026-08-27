@@ -67,6 +67,54 @@ class CharTokenizer:
         return self.token_to_id["<eos>"]
 
 
+class ToyDataset(torch.utils.data.Dataset):
+    """Repeated toy-corpus sequences for multi-step smoke training.
+
+    Wraps :func:`tokenise_corpus` so a real training loop can run
+    several optimizer steps without requiring the HuggingFace ``datasets``
+    dependency (useful for CPU smoke tests and CI).
+    """
+
+    def __init__(self, text: str | None = None, n_sequences: int = 64) -> None:
+        ids, _ = tokenise_corpus(text=text, max_len=256)
+        self.seq = ids.squeeze(0)
+        self.n_sequences = n_sequences
+
+    def __len__(self) -> int:
+        return self.n_sequences
+
+    def __getitem__(self, index: int) -> dict:
+        return {"input_ids": self.seq, "labels": self.seq}
+
+
+def build_toy_dataloader(
+    text: str | None = None,
+    n_sequences: int = 64,
+    batch_size: int = 8,
+    repeat: bool = True,
+) -> DataLoader:
+    """DataLoader over repeated toy-corpus sequences (no HF dependency).
+
+    With ``repeat=True`` (default) the loader yields batches forever by
+    cycling, so a training loop can run an exact number of ``--steps``
+    regardless of ``n_sequences``.
+    """
+    import itertools
+
+    ds = ToyDataset(text=text, n_sequences=n_sequences)
+    base = DataLoader(ds, batch_size=batch_size, shuffle=False)
+    if not repeat:
+        return base
+
+    class _CyclicLoader:
+        """Wrap a DataLoader so ``iter()`` never exhausts."""
+
+        def __iter__(self):
+            return itertools.cycle(base)
+
+    return _CyclicLoader()  # type: ignore[return-value]
+
+
 def tokenise_corpus(text: str | None = None, max_len: int = 256) -> tuple[Tensor, CharTokenizer]:
     tok = CharTokenizer(text if text is not None else DEFAULT_CORPUS)
     ids = [tok.bos_id] + tok.encode(text if text is not None else DEFAULT_CORPUS) + [tok.eos_id]

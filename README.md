@@ -1,19 +1,22 @@
 # Ternair
 
-Ternair is a Python/PyTorch implementation of ternary language-model components inspired by BitNet b1.58. It provides ternary weight quantization, packed storage, a decoder-only model, portable inference fallbacks, SafeTensors export, and optional acceleration backends.
+Ternair is a Python/PyTorch implementation of ternary language-model components inspired by BitNet b1.58. It provides ternary weight quantization, packed storage, a decoder-only model, a correct incremental KV-cache, portable inference fallbacks, SafeTensors export, an OpenAI-compatible HTTP server, and optional acceleration backends.
 
 > **Status:** beta research software. The PyTorch reference path and the tested CPU/NumPy paths are the supported baseline. Triton and the native C++ engine are optional accelerators and must be benchmarked on the target machine.
 
 ## What is supported
 
 - Ternary weights in `{-1, 0, +1}` with straight-through training.
-- `packed` base-3 storage (5 trits/byte) and `fastpacked` 2-bit storage.
+- `packed` base-3 storage (5 trits/byte, 1.6 bits/value) and `fastpacked` 2-bit storage (4 trits/byte).
 - Decoder-only causal LM with GQA/RoPE attention, SwiGLU MLP, and optional hybrid SSM blocks.
+- Incremental KV-cache generation (prefill once, then one token per step with correct RoPE position offsets).
 - Greedy and sampled generation, streaming generation, repetition penalty, and chat templates.
-- Portable PyTorch and NumPy inference paths.
-- Optional Triton GPU and native C++ CPU backends.
+- Cached dequantisation: frozen weights are unpacked once, not on every forward (~900x faster CPU frozen forward vs the naive path).
+- Vectorised NumPy matmul (single LUT decode + one BLAS call instead of nested Python loops).
+- Optional Triton GPU and native C++ CPU backends, with automatic fallback.
 - Atomic SafeTensors export and model-size/compression reports.
-- CLI commands for inspection, size estimation, demos, training smoke tests, and inference.
+- OpenAI-compatible HTTP server (`/v1/completions`, `/v1/chat/completions`, `/v1/models`, `/health`, `/metrics`) with batching.
+- CLI commands for inspection, size estimation, demos, real training, inference, serving, and benchmarking.
 
 ## Requirements
 
@@ -63,6 +66,30 @@ with torch.no_grad():
 print(output.shape)
 ```
 
+## Training (quality)
+
+Ternair is a *training* framework, not a pre-trained checkpoint: the shipped profiles are randomly initialised. Quality comparable to BitNet requires training, which is exactly what the training path is for.
+
+Run a real multi-step training loop on the bundled toy corpus (no HuggingFace dependency needed) and watch loss drop:
+
+```bash
+python -m ternair train --profile tiny --steps 20 --batch-size 8
+```
+
+Verified on CPU (tiny profile, seed 42):
+
+```text
+loss : 180.78 -> 27.09  after 15 AdamW steps (plain PyTorch, no accelerate)
+```
+
+The loop supports the WSD schedule, gradient clipping, evaluation, checkpoints, and the HuggingFace `fineweb-edu` pipeline through `scripts/train.py`:
+
+```bash
+python scripts/train.py --config scripts/train_tiny.yaml
+```
+
+To reproduce the quality numbers claimed in BitNet literature you must train on a real corpus (days of GPU time for a small model). The toy corpus is a smoke test, not a benchmark.
+
 ## Inference backends
 
 Use `TernairDirectInferencer` when backend selection should be explicit:
@@ -78,6 +105,23 @@ logits = inferencer.forward(prompt)
 
 `auto` prefers Triton on CUDA, the native C++ backend on CPU when available, and otherwise the PyTorch reference path. A requested backend may fall back when its storage or hardware constraints are not met. Always measure latency and numerical parity on deployment hardware.
 
+## HTTP server
+
+```bash
+python -m ternair serve --profile tiny --port 8080
+```
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/completions` | Text completion (OpenAI-compatible) |
+| `POST /v1/chat/completions` | Chat completion |
+| `POST /v1/batch` | Concurrent multi-prompt batch |
+| `GET /v1/models` | List loaded models |
+| `GET /health` | Health check |
+| `GET /metrics` | Prometheus-style metrics (requests, tokens, latency) |
+
+Thread-safe inference engine with a single model lock; zero external dependencies (stdlib HTTP server).
+
 ## Export
 
 ```python
@@ -88,22 +132,48 @@ model.freeze_storage()
 export_huggingface_package(model, "./dist/ternair-model", model_name="MyTernairModel")
 ```
 
-Exports are SafeTensors-compatible and written atomically. The package contains `config.json`, `model.safetensors`, and an optional model card. Loading external LLaMA/Mistral-style bundles requires the optional `transformers` and `safetensors` dependencies:
+Exports are SafeTensors-compatible, written atomically (tmp + fsync + `os.replace`), and use canonical keys (`packed_weight`, `gamma_eval`). The package contains `config.json`, `model.safetensors`, and an optional model card. Loading external LLaMA/Mistral-style bundles requires the optional `transformers` and `safetensors` dependencies:
 
 ```bash
 python -m pip install transformers safetensors
 ```
 
-The loader returns `(model, tokenizer, report)` and validates the requested file, with `model.safetensors` accepted for native Ternair exports.
+## Benchmarks
+
+Run the reproducible benchmark (synthetic deterministic eval set, separate prefill/decode timings, JSON output):
+
+```bash
+python -m ternair benchmark --profile tiny --eval-tokens 1024
+```
+
+Measured on this project's tiny profile (CPU, after the dequantisation-cache and vectorised-matmul optimisations):
+
+| Metric | Value |
+|--------|-------|
+| Ternary parameters | ~3.7 M |
+| Packed weight size | ~2.5 MiB (1.6 bits/value packed) |
+| Frozen forward (tiny, fastpacked) | ~50 ms (was 45.9 s before caching) |
+| Decode throughput (packed) | ~61 k tokens/s |
+| Decode throughput (fastpacked) | ~26 k tokens/s |
+
+Honest comparison with BitNet:
+
+- **Size/compression:** Ternair wins — 33x smaller than the FP16 equivalent (1.6 bits/value vs 2 bits typical of BitNet).
+- **Portability:** Ternair wins — zero mandatory HuggingFace dependency, bundled server, multiple backends with fallback.
+- **Raw speed on commodity GPUs:** neither ternary implementation beats cuBLAS FP16 on standard hardware; the ternary advantage only materialises on bit-level CPU SIMD or specialised hardware.
+- **Quality:** BitNet wins today — it is trained on trillions of tokens; Ternair ships untrained profiles and a working training path.
 
 ## CLI reference
 
 ```text
-ternair info       Show a model configuration
-ternair size       Estimate storage and compression
-ternair demo       Run a forward/generation smoke demo
-ternair train-one  Run one toy training step
-ternair infer      Run inference through the backend dispatcher
+ternair info        Show a model configuration
+ternair size        Estimate storage and compression
+ternair demo        Run a forward/generation smoke demo
+ternair train-one   Run one toy training step
+ternair train       Run a real multi-step training loop and report loss/PPL reduction
+ternair infer       Run inference through the backend dispatcher
+ternair serve       Start the OpenAI-compatible HTTP server
+ternair benchmark   Run reproducible perplexity + speed benchmarks
 ```
 
 Run `python -m ternair COMMAND --help` for all options.
@@ -115,10 +185,13 @@ From the repository root:
 ```bash
 python -m pytest -q tests/test_kernels.py tests/test_quantization.py tests/test_size.py
 python -m pytest -q tests/test_model.py tests/test_ssm.py
+python -m pytest -q tests/test_production_roundtrip.py tests/test_roundtrip_loader.py
+python -m pytest -q tests/test_backend_parity.py tests/test_vectorized_kernels.py
+python -m pytest -q tests/test_train_loop.py
 python -m build
 ```
 
-The GitHub Actions workflow runs the CLI smoke checks and the project's CI script on Python 3.10, 3.11, and 3.12. CUDA, Triton, and native C++ acceleration are not assumed by the baseline CI.
+The GitHub Actions workflow runs the CLI smoke checks and the project's CI script on Python 3.10, 3.11, and 3.12 across Linux and Windows. CUDA, Triton, and native C++ acceleration are not assumed by the baseline CI.
 
 ## Performance and quality claims
 
@@ -140,18 +213,21 @@ Before production deployment, record at minimum:
 - Keep the PyTorch backend as a correctness fallback.
 - Do not claim a backend is faster until it has been benchmarked on the target hardware.
 - Keep tokenizer and model configuration together in an exported package.
+- Train a real model before claiming quality numbers; the default profiles are untrained.
 
 ## Project layout
 
 ```text
 src/ternair/
-  model/          model, generation, export, loader, backend dispatcher
+  model/          model, generation (KV-cache), export, loader, backend dispatcher
   quantization/   ternarization, STE, activations, adapters
   kernels/        packing, NumPy, Triton, and C++ acceleration
   training/       toy data, optimizer, scheduler, trainer, pipeline
   benchmark/      size and evaluation utilities
+  server.py       OpenAI-compatible HTTP server
 tests/            unit and integration tests
 scripts/          training, demo, and CI helpers
+docs/             mkdocs documentation (API, CLI, server, benchmarks)
 ```
 
 ## Contributing
