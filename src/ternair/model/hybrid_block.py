@@ -65,9 +65,9 @@ class TernairHybridBlock(nn.Module):
         else:
             self.ssm_block = TernarySSMBlock(config)
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:  # type: ignore[override]
+    def forward(self, x: Tensor, cos: Tensor, sin: Tensor, use_cache: bool = False) -> Tensor:  # type: ignore[override]
         if self.is_attn:
-            return self.block(x, cos, sin)
+            return self.block(x, cos, sin, use_cache=use_cache)
         # SSM blocks ignore RoPE; pass through unchanged
         return self.ssm_block(x)
 

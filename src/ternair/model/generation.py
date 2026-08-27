@@ -153,18 +153,28 @@ def generate(
         raise ValueError("repetition_penalty must be > 0")
     out = input_ids.clone()
     eos = eos_token_id if eos_token_id is not None else pad_token_id
+    use_cache = not model.training
 
-    for step in range(max_new_tokens):
-        logits = model(out)
-        logits = logits[:, -1, :]  # (1, vocab_size)
+    # Prefill: process the full prompt and cache K/V.
+    logits = model(out, use_cache=use_cache)
+    logits = logits[:, -1, :]  # (1, vocab_size)
 
-        # Apply repetition penalty
+    if repetition_penalty != 1.0:
+        logits = _apply_repetition_penalty(logits, out, penalty=repetition_penalty)
+    next_token = _sample_token(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+    out = torch.cat([out, next_token], dim=-1)
+    if eos is not None and int(next_token.item()) == eos:
+        return out
+
+    # Decode: feed only the new token each step.
+    for _ in range(max_new_tokens - 1):
+        logits = model(out[:, -1:], use_cache=use_cache)
+        logits = logits[:, -1, :]
+
         if repetition_penalty != 1.0:
             logits = _apply_repetition_penalty(logits, out, penalty=repetition_penalty)
-
         next_token = _sample_token(logits, temperature=temperature, top_k=top_k, top_p=top_p)
         out = torch.cat([out, next_token], dim=-1)
-
         if eos is not None and int(next_token.item()) == eos:
             break
 
@@ -212,21 +222,32 @@ def generate_stream(
     out = input_ids.clone()
     eos = eos_token_id if eos_token_id is not None else pad_token_id
     generated: list[int] = []
+    use_cache = not model.training
 
-    for _ in range(max_new_tokens):
-        logits = model(out)
+    # Prefill
+    logits = model(out, use_cache=use_cache)
+    logits = logits[:, -1, :]
+    if repetition_penalty != 1.0:
+        logits = _apply_repetition_penalty(logits, out, penalty=repetition_penalty)
+    next_token = _sample_token(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+    out = torch.cat([out, next_token], dim=-1)
+    token_id = int(next_token.item())
+    generated.append(token_id)
+    yield next_token.squeeze(0)
+    if eos is not None and token_id == eos:
+        return generated
+
+    # Decode
+    for _ in range(max_new_tokens - 1):
+        logits = model(out[:, -1:], use_cache=use_cache)
         logits = logits[:, -1, :]
-
         if repetition_penalty != 1.0:
             logits = _apply_repetition_penalty(logits, out, penalty=repetition_penalty)
-
         next_token = _sample_token(logits, temperature=temperature, top_k=top_k, top_p=top_p)
         out = torch.cat([out, next_token], dim=-1)
         token_id = int(next_token.item())
         generated.append(token_id)
-
-        yield next_token.squeeze(0)  # (1,) → scalar view
-
+        yield next_token.squeeze(0)
         if eos is not None and token_id == eos:
             break
 

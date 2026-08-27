@@ -69,14 +69,24 @@ class TernairModel(nn.Module):
         self._cached_seq_len = seq_len
         return cos, sin
 
-    def forward(self, input_ids: Tensor) -> Tensor:  # type: ignore[override]
+    def forward(self, input_ids: Tensor, use_cache: bool = False) -> Tensor:  # type: ignore[override]
         x = self.embed_tokens(input_ids)
         x = quantize_activations_8bit_forward(x)
+        seq_len = x.shape[1]
+        # During decode with KV-cache, RoPE must cover the absolute
+        # position of the new token (kv_cache_len).
+        needed = seq_len
+        if use_cache and not self.training:
+            for layer in self.layers:
+                if layer.is_attn:
+                    attn_len = layer.block.attn._kv_cache_len
+                    needed = max(needed, attn_len + seq_len)
+                    break
         cos, sin = self._ensure_rope_cache(
-            seq_len=x.shape[1], device=x.device, dtype=x.dtype
+            seq_len=needed, device=x.device, dtype=x.dtype
         )
         for block in self.layers:
-            x = block(x, cos, sin)
+            x = block(x, cos, sin, use_cache=use_cache)
         return self.norm(x)
 
 
@@ -94,8 +104,8 @@ class TernairForCausalLM(nn.Module):
                 config.hidden_size, config.vocab_size, bias=False, storage=config.storage
             )
 
-    def forward(self, input_ids: Tensor) -> Tensor:  # type: ignore[override]
-        h = self.model(input_ids)
+    def forward(self, input_ids: Tensor, use_cache: bool = False) -> Tensor:  # type: ignore[override]
+        h = self.model(input_ids, use_cache=use_cache)
         if self.lm_head is None:
             logits = h @ self.model.embed_tokens.weight.T
         else:

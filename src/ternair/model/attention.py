@@ -132,36 +132,51 @@ class TernairAttention(nn.Module):
         k = self.k_proj(x_q).view(B, T, KV, D).transpose(1, 2)   # (B, KV, T, D)
         v = self.v_proj(x_q).view(B, T, KV, D).transpose(1, 2)   # (B, KV, T, D)
 
-        q = _apply_rope(q, cos, sin)
-        k = _apply_rope(k, cos, sin)
+        # Determine if this is a decode step (single token after prefill).
+        is_decode = use_cache and not self.training and self._kv_cache_k is not None
 
-        # Reserved for future incremental API.
-        cache_enabled = False
-        if cache_enabled:
-            k_q = _quantize_kv(k, bits=self._kv_bits)
-            v_q = _quantize_kv(v, bits=self._kv_bits)
-            if self._kv_cache_k is None:
-                self._kv_cache_k = k_q
-                self._kv_cache_v = v_q
+        if is_decode:
+            # Decode: apply RoPE at absolute position for the new token.
+            pos = self._kv_cache_len
+            q = _apply_rope(q, cos[pos:pos+1], sin[pos:pos+1])
+            k = _apply_rope(k, cos[pos:pos+1], sin[pos:pos+1])
+            # Append to cache
+            self._kv_cache_k = torch.cat([self._kv_cache_k, k], dim=2)
+            self._kv_cache_v = torch.cat([self._kv_cache_v, v], dim=2)
+            k_full = self._kv_cache_k
+            v_full = self._kv_cache_v
+            self._kv_cache_len = k_full.shape[2]
+        elif use_cache and not self.training:
+            # Prefill: apply RoPE for all positions, then cache.
+            q = _apply_rope(q, cos, sin)
+            k = _apply_rope(k, cos, sin)
+            if self._use_kv_quant:
+                self._kv_cache_k = _quantize_kv(k, bits=self._kv_bits)
+                self._kv_cache_v = _quantize_kv(v, bits=self._kv_bits)
             else:
-                self._kv_cache_k = torch.cat([self._kv_cache_k, k_q], dim=2)
-                self._kv_cache_v = torch.cat([self._kv_cache_v, v_q], dim=2)
-            k = self._kv_cache_k
-            v = self._kv_cache_v
-            self._kv_cache_len = k.shape[2]
+                self._kv_cache_k = k
+                self._kv_cache_v = v
+            self._kv_cache_len = self._kv_cache_k.shape[2]
+            k_full = self._kv_cache_k
+            v_full = self._kv_cache_v
+        else:
+            # Training / no cache: standard full-sequence path.
+            q = _apply_rope(q, cos, sin)
+            k = _apply_rope(k, cos, sin)
+            k_full = k
+            v_full = v
 
         # GQA head expansion
         if KV != H:
             repeat = H // KV
-            k = k.repeat_interleave(repeat, dim=1)
-            v = v.repeat_interleave(repeat, dim=1)
+            k_full = k_full.repeat_interleave(repeat, dim=1)
+            v_full = v_full.repeat_interleave(repeat, dim=1)
 
-        causal_mask = None
         ctx = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=causal_mask,
+            q, k_full, v_full,
+            attn_mask=None,
             dropout_p=0.0,
-            is_causal=True,
+            is_causal=not is_decode,
         )  # (B, H, T, D)
 
         ctx = ctx.transpose(1, 2).contiguous().view(B, T, H * D)

@@ -10,8 +10,13 @@ from ternair.model.size_profiles import base_profile, one_gb_profile, tiny_profi
 from ternair.kernels.packing_base8 import BITS_PER_VALUE
 
 
+from ternair.model.size_profiles import small_profile, medium_profile, large_profile
+
 PROFILES = {
     "tiny": tiny_profile,
+    "small": small_profile,
+    "medium": medium_profile,
+    "large": large_profile,
     "base": base_profile,
     "one_gb": one_gb_profile,
 }
@@ -90,6 +95,40 @@ def _train_one(args: argparse.Namespace) -> int:
     loss, _ = train_one_step(model, ids, optimizer=optimizer)
     print(f"profile={args.profile}  loss={loss:.4f}  vocab={tok.vocab_size}")
     print(f"params including embedding: {model.count_parameters(include_embedding=True):,}")
+    return 0
+
+
+def _serve(args: argparse.Namespace) -> int:
+    """Start the HTTP inference server."""
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    from ternair.server import serve
+    serve(
+        profile_name=args.profile,
+        host=args.host,
+        port=args.port,
+        storage=args.storage,
+    )
+    return 0
+
+
+def _benchmark(args: argparse.Namespace) -> int:
+    """Run reproducible benchmarks."""
+    from ternair.benchmark.reproducible import run_benchmark
+    result = run_benchmark(
+        profile=args.profile,
+        storage=args.storage,
+        device=args.device,
+        run_perplexity=not args.skip_perplexity,
+        run_speed=not args.skip_speed,
+        eval_tokens=args.eval_tokens,
+    )
+    print(result.summary())
+    if args.output:
+        import json
+        with open(args.output, "w") as f:
+            json.dump(result.to_dict(), f, indent=2)
+        print(f"Results saved to {args.output}")
     return 0
 
 
@@ -228,6 +267,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow building larger profiles (slow on CPU).",
     )
     p_infer.set_defaults(func=_infer)
+
+    p_serve = sub.add_parser(
+        "serve",
+        parents=[common],
+        help="Start OpenAI-compatible HTTP inference server.",
+    )
+    p_serve.add_argument("--host", default="0.0.0.0", help="Bind address.")
+    p_serve.add_argument("--port", type=int, default=8080, help="Bind port.")
+    p_serve.set_defaults(func=_serve)
+
+    p_bench = sub.add_parser(
+        "benchmark",
+        parents=[common],
+        help="Run reproducible benchmarks (perplexity + speed).",
+    )
+    p_bench.add_argument("--device", default="cpu", help="cpu or cuda.")
+    p_bench.add_argument("--eval-tokens", type=int, default=1024, help="Tokens for perplexity.")
+    p_bench.add_argument("--skip-perplexity", action="store_true")
+    p_bench.add_argument("--skip-speed", action="store_true")
+    p_bench.add_argument("--output", default=None, help="Save JSON results.")
+    p_bench.set_defaults(func=_benchmark)
 
     return p
 
