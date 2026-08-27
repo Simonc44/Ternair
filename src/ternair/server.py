@@ -6,13 +6,16 @@ Usage::
 
 Endpoints
 ---------
-* ``POST /v1/chat/completions`` — OpenAI-compatible chat completion.
-* ``POST /v1/completions`` — OpenAI-compatible text completion.
-* ``GET  /v1/models`` — List available models.
-* ``GET  /health`` — Health check.
-* ``GET  /metrics`` — Prometheus-compatible metrics (text format).
+* ``POST /v1/completions`` — text completion (single prompt).
+* ``POST /v1/chat/completions`` — chat completion.
+* ``POST /v1/batch`` — batch completion (multiple prompts in parallel).
+* ``GET  /v1/models`` — list available models.
+* ``GET  /health`` — health check.
+* ``GET  /metrics`` — Prometheus-compatible metrics.
 
-Dependencies: ``torch``, ``ternair`` (core only; no extra packages required).
+Dynamic batching: ``POST /v1/batch`` accepts ``{"prompts": [...], "max_tokens": N}``
+and processes all prompts concurrently with a thread pool, returning results
+as a JSON array.  This is the recommended path for high-throughput workloads.
 """
 
 from __future__ import annotations
@@ -22,19 +25,20 @@ import logging
 import time
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any
 
 import torch
 
 from ternair.model.modeling import TernairForCausalLM
-from ternair.model.size_profiles import tiny_profile
 from ternair.model.generation import generate, format_chat_prompt
 
 _LOGGER = logging.getLogger("ternair.server")
 
+
 # ---------------------------------------------------------------------------
-# Metrics (simple in-process counters, Prometheus text exposition)
+# Metrics
 # ---------------------------------------------------------------------------
 
 
@@ -64,9 +68,7 @@ class _Metrics:
     def to_prometheus(self) -> str:
         with self._lock:
             uptime = time.time() - self._start
-            avg_gen = (
-                self.total_generation_seconds / max(self.tokens_generated, 1)
-            )
+            avg_gen = self.total_generation_seconds / max(self.tokens_generated, 1)
             return (
                 "# HELP ternair_requests_total Total requests served.\n"
                 f"# TYPE ternair_requests_total counter\n"
@@ -87,31 +89,37 @@ class _Metrics:
 
 
 # ---------------------------------------------------------------------------
-# Inference wrapper (thread-safe with a model lock)
+# Inference engine
 # ---------------------------------------------------------------------------
 
 
 class _InferenceEngine:
-    """Wraps a Ternair model for threaded serving."""
+    """Thread-safe inference engine with a model lock and batch support."""
 
-    def __init__(self, model: TernairForCausalLM, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        model: TernairForCausalLM,
+        device: str = "cpu",
+        max_batch_workers: int = 4,
+    ) -> None:
         self.model = model
         self.device = device
         self.model_name = "ternair"
         self._lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=max_batch_workers)
+
+    # ---- single request ---------------------------------------------------
 
     @torch.no_grad()
     def complete(
         self,
-        prompt: str,
+        prompt: str = "",
         max_tokens: int = 64,
         temperature: float = 0.8,
         top_k: int = 40,
         top_p: float = 0.9,
         repetition_penalty: float = 1.1,
     ) -> dict[str, Any]:
-        """Run text completion and return an OpenAI-compatible response dict."""
-        # Tokenise using the internal char tokenizer
         from ternair.training.data import CharTokenizer, DEFAULT_CORPUS
 
         tok = CharTokenizer(DEFAULT_CORPUS)
@@ -143,13 +151,7 @@ class _InferenceEngine:
             "object": "text_completion",
             "created": int(time.time()),
             "model": self.model_name,
-            "choices": [
-                {
-                    "text": text,
-                    "index": 0,
-                    "finish_reason": "stop",
-                }
-            ],
+            "choices": [{"text": text, "index": 0, "finish_reason": "stop"}],
             "usage": {
                 "prompt_tokens": prompt_len,
                 "completion_tokens": gen_count,
@@ -161,38 +163,65 @@ class _InferenceEngine:
     @torch.no_grad()
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, str]] | None = None,
         max_tokens: int = 64,
         temperature: float = 0.8,
         top_k: int = 40,
         top_p: float = 0.9,
         repetition_penalty: float = 1.1,
     ) -> dict[str, Any]:
-        """Run chat completion and return an OpenAI-compatible response dict."""
-        prompt = format_chat_prompt(messages, format="chatml")
+        prompt = format_chat_prompt(messages or [], format="chatml")
         comp = self.complete(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
+            prompt, max_tokens=max_tokens, temperature=temperature,
+            top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
         )
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": self.model_name,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": comp["choices"][0]["text"]},
-                    "finish_reason": "stop",
-                }
-            ],
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": comp["choices"][0]["text"]},
+                "finish_reason": "stop",
+            }],
             "usage": comp["usage"],
             "_metrics": comp["_metrics"],
         }
+
+    # ---- batch request (parallel) -----------------------------------------
+
+    def batch_complete(
+        self,
+        prompts: list[str],
+        max_tokens: int = 64,
+        temperature: float = 0.8,
+        top_k: int = 40,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.1,
+    ) -> list[dict[str, Any]]:
+        """Process multiple prompts concurrently via the thread pool.
+
+        Each prompt is handled by a separate thread; the model lock
+        serialises the actual GPU/CPU work so there is no contention.
+        """
+        futures = []
+        for p in prompts:
+            futures.append(self._pool.submit(
+                self.complete,
+                prompt=p,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+            ))
+        results = []
+        for f in futures:
+            r = f.result(timeout=60.0)
+            r.pop("_metrics", None)
+            results.append(r)
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -201,16 +230,13 @@ class _InferenceEngine:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Routes requests to the inference engine."""
-
-    engine: _InferenceEngine  # set by serve()
-    metrics: _Metrics  # set by serve()
+    engine: _InferenceEngine
+    metrics: _Metrics
 
     def log_message(self, fmt: str, *args: Any) -> None:
         _LOGGER.info(fmt % args)
 
-    # --- helpers ---
-    def _json(self, data: dict, status: int = 200) -> None:
+    def _json(self, data: Any, status: int = 200) -> None:
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -218,10 +244,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _text(self, data: str, content_type: str = "text/plain") -> None:
+    def _text(self, data: str) -> None:
         body = data.encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -231,26 +257,16 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         return json.loads(raw) if raw else {}
 
-    # --- routes ---
     def do_GET(self) -> None:
         if self.path == "/health":
             self._json({"status": "ok"})
         elif self.path == "/v1/models":
-            self._json(
-                {
-                    "object": "list",
-                    "data": [
-                        {
-                            "id": self.engine.model_name,
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": "ternair",
-                        }
-                    ],
-                }
-            )
+            self._json({
+                "object": "list",
+                "data": [{"id": self.engine.model_name, "object": "model", "created": 0, "owned_by": "ternair"}],
+            })
         elif self.path == "/metrics":
-            self._text(self.metrics.to_prometheus(), "text/plain; version=0.0.4")
+            self._text(self.metrics.to_prometheus())
         else:
             self._json({"error": "Not found"}, 404)
 
@@ -289,6 +305,21 @@ class _Handler(BaseHTTPRequestHandler):
                 self.metrics.record(*metrics)
                 self._json(result)
 
+            elif self.path == "/v1/batch":
+                prompts = body.get("prompts", [])
+                if not isinstance(prompts, list) or len(prompts) == 0:
+                    self._json({"error": "prompts must be a non-empty list"}, 400)
+                    return
+                results = self.engine.batch_complete(
+                    prompts=prompts,
+                    max_tokens=body.get("max_tokens", 64),
+                    temperature=body.get("temperature", 0.8),
+                    top_k=body.get("top_k", 40),
+                    top_p=body.get("top_p", 0.9),
+                    repetition_penalty=body.get("repetition_penalty", 1.1),
+                )
+                self._json({"results": results})
+
             else:
                 self._json({"error": "Not found"}, 404)
 
@@ -308,20 +339,9 @@ def serve(
     host: str = "0.0.0.0",
     port: int = 8080,
     storage: str = "fastpacked",
+    max_batch_workers: int = 4,
 ) -> None:
-    """Start the Ternair HTTP server (blocking).
-
-    Parameters
-    ----------
-    profile_name
-        Model profile: ``tiny``, ``small``, ``medium``, ``large``, ``base``.
-    host
-        Bind address.
-    port
-        Bind port.
-    storage
-        Weight storage mode.
-    """
+    """Start the Ternair HTTP server (blocking)."""
     from ternair.model.size_profiles import PROFILE_REGISTRY
 
     profile_fn = PROFILE_REGISTRY.get(profile_name)
@@ -335,7 +355,7 @@ def serve(
     model.eval()
     _LOGGER.info("Model ready. Starting server on %s:%d", host, port)
 
-    engine = _InferenceEngine(model)
+    engine = _InferenceEngine(model, max_batch_workers=max_batch_workers)
     metrics = _Metrics()
     _Handler.engine = engine
     _Handler.metrics = metrics

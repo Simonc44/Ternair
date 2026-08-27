@@ -1,0 +1,39 @@
+site_name: Ternair
+site_description: Ternary language model inference engine based on BitNet b1.58
+repo_url: https://github.com/Simonc44/Ternair
+repo_name: Simonc44/Ternair
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - API Reference: api.md
+  - CLI Reference: cli.md
+  - Server Guide: server.md
+  - Benchmarks: benchmarks.md
+
+markdown_extensions:
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed
+  - admonition
+  - toc:
+      permalink: true
