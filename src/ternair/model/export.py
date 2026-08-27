@@ -288,7 +288,7 @@ def export_to_safetensors(
     total_bytes = len(safetensor_bytes)
     print(
         f"Exported {len(tensors)} tensors ({param_count:,} params, "
-        f"{total_bytes / 1024**2:.2f} MiB) → {output_path}"
+        f"{total_bytes / 1024**2:.2f} MiB) -> {output_path}"
     )
     return output_path
 
@@ -304,10 +304,10 @@ def export_huggingface_package(
 
     Creates the following files in ``output_dir``:
 
-    * ``config.json``  — model configuration
-    * ``model.safetensors``  — frozen ternary weights
-    * ``model.safetensors.index.json`` — optional shard index
-    * ``README.md``  — auto-generated model card
+    * ``config.json``  - model configuration
+    * ``model.safetensors``  - frozen ternary weights
+    * ``model.safetensors.index.json`` - optional shard index
+    * ``README.md``  - auto-generated model card
 
     Parameters
     ----------
@@ -453,7 +453,7 @@ tags:
 
 # {model_name}
 
-This model was created with **Ternair** — a BitNet b1.58 inference engine
+This model was created with **Ternair** - a BitNet b1.58 inference engine
 that stores every weight in `{{-1, 0, +1}}` (1.58-bit quantization).
 
 ## Model Details

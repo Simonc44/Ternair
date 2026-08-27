@@ -22,8 +22,12 @@ PROFILES = {
 }
 
 
+def _storage(args: argparse.Namespace, fallback: str = "packed") -> str:
+    return args.storage if args.storage is not None else fallback
+
+
 def _info(args: argparse.Namespace) -> int:
-    cfg = PROFILES[args.profile](storage=args.storage)
+    cfg = PROFILES[args.profile](storage=_storage(args))
     if args.fit_one_gb:
         cfg = fit_one_gb(cfg)
     print(cfg.to_dict())
@@ -31,7 +35,7 @@ def _info(args: argparse.Namespace) -> int:
 
 
 def _size(args: argparse.Namespace) -> int:
-    cfg = PROFILES[args.profile](storage=args.storage)
+    cfg = PROFILES[args.profile](storage=_storage(args))
     if args.fit_one_gb:
         cfg = fit_one_gb(cfg)
     print(describe(cfg, embedding_dtype_bytes=args.embedding_dtype_bytes))
@@ -45,7 +49,8 @@ def _demo(args: argparse.Namespace) -> int:
     from ternair.model.generation import generate
     from ternair.training.data import CharTokenizer, DEFAULT_CORPUS
 
-    profile = PROFILES[args.profile](storage=args.storage)
+    storage = _storage(args)
+    profile = PROFILES[args.profile](storage=storage)
     if profile.num_hidden_layers > 12 and not args.allow_big:
         print(
             f"[warn] profile {args.profile!r} has "
@@ -55,22 +60,22 @@ def _demo(args: argparse.Namespace) -> int:
         )
         return 2
 
-    print(f"Building ternair model ({args.profile}, storage={args.storage})…")
+    print(f"Building ternair model ({args.profile}, storage={storage})...")
     model = TernairForCausalLM(profile)
-    print(f"  ↳ ternary params : {model.count_parameters():,}")
+    print(f"  -> ternary params : {model.count_parameters():,}")
 
     # Smoke forward
     tok = CharTokenizer(DEFAULT_CORPUS)
     ids = torch.tensor([tok.bos_id] + tok.encode("hello world"), dtype=torch.long).unsqueeze(0)
     out = model(ids)
-    print(f"  ↳ forward logits shape: {tuple(out.shape)}")
+    print(f"  -> forward logits shape: {tuple(out.shape)}")
 
     # Freeze and re-forward to prove the inference path works.
-    print("Calling freeze_storage() to switch to packed trit buffer …")
+    print("Calling freeze_storage() to switch to packed trit buffer ...")
     model.freeze_storage()
     model.eval()
     out2 = model(ids)
-    print(f"  ↳ post-freeze logits shape: {tuple(out2.shape)}")
+    print(f"  -> post-freeze logits shape: {tuple(out2.shape)}")
 
     if args.max_new_tokens > 0:
         generated = generate(model, ids, max_new_tokens=args.max_new_tokens, eos_token_id=tok.eos_id)
@@ -88,7 +93,7 @@ def _train_one(args: argparse.Namespace) -> int:
     from ternair.training.trainer import train_one_step
     from ternair.training.data import tokenise_corpus
 
-    cfg = PROFILES[args.profile](storage=args.storage)
+    cfg = PROFILES[args.profile](storage=_storage(args))
     model = TernairForCausalLM(cfg)
     ids, tok = tokenise_corpus()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -107,7 +112,7 @@ def _serve(args: argparse.Namespace) -> int:
         profile_name=args.profile,
         host=args.host,
         port=args.port,
-        storage=args.storage,
+        storage=_storage(args, fallback="fastpacked"),
     )
     return 0
 
@@ -117,7 +122,7 @@ def _benchmark(args: argparse.Namespace) -> int:
     from ternair.benchmark.reproducible import run_benchmark
     result = run_benchmark(
         profile=args.profile,
-        storage=args.storage,
+        storage=_storage(args),
         device=args.device,
         run_perplexity=not args.skip_perplexity,
         run_speed=not args.skip_speed,
@@ -140,7 +145,8 @@ def _infer(args: argparse.Namespace) -> int:
     from ternair.model.inference import TernairDirectInferencer
     from ternair.training.data import CharTokenizer, DEFAULT_CORPUS
 
-    profile = PROFILES[args.profile](storage=args.storage)
+    storage = _storage(args, fallback="fastpacked")
+    profile = PROFILES[args.profile](storage=storage)
     if profile.num_hidden_layers > 12 and not args.allow_big:
         print(
             f"[warn] profile {args.profile!r} has "
@@ -150,15 +156,15 @@ def _infer(args: argparse.Namespace) -> int:
         )
         return 2
 
-    print(f"Building ternair model ({args.profile}, storage={args.storage})…")
+    print(f"Building ternair model ({args.profile}, storage={storage})...")
     model = TernairForCausalLM(profile)
-    print(f"  ↳ ternary params : {model.count_parameters():,}")
+    print(f"  -> ternary params : {model.count_parameters():,}")
 
     # Wire the direct-inference backend (auto resolves to triton/cpu_cpp/torch).
     inferer = TernairDirectInferencer(model, backend=args.backend, device=args.device)
     info = inferer.describe()
     print(
-        f"  ↳ backend: requested={info['requested_backend']} "
+        f"  -> backend: requested={info['requested_backend']} "
         f"resolved={info['resolved_backend']} "
         f"device={info['device']} "
         f"ternary_layers={info['n_ternary_layers']}"
@@ -170,7 +176,7 @@ def _infer(args: argparse.Namespace) -> int:
     # Smoke forward
     inferer.prepare()
     logits = inferer.forward(ids)
-    print(f"  ↳ forward logits shape: {tuple(logits.shape)}")
+    print(f"  -> forward logits shape: {tuple(logits.shape)}")
 
     if args.max_new_tokens > 0:
         out = inferer.generate(
@@ -182,11 +188,11 @@ def _infer(args: argparse.Namespace) -> int:
             eos_token_id=tok.eos_id,
         )
         text = tok.decode(out[0].tolist())
-        print(f"  ↳ generated tokens : {out[0].tolist()}")
-        print(f"  ↳ decoded text     : {text!r}")
+        print(f"  -> generated tokens : {out[0].tolist()}")
+        print(f"  -> decoded text     : {text!r}")
 
     print(
-        f"  ↳ backend stats : available={TernairDirectInferencer.available_backends()}"
+        f"  -> backend stats : available={TernairDirectInferencer.available_backends()}"
     )
     return 0
 
@@ -199,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--storage",
         choices=["packed", "int8", "fastpacked"],
-        default="packed",
+        default=None,
         help="Packed storage format. fastpacked (4 trits/byte) is required for kernel backends.",
     )
     common.add_argument(
@@ -242,10 +248,9 @@ def build_parser() -> argparse.ArgumentParser:
             "(auto-selects triton / cpu_cpp / torch kernels)."
         ),
     )
-    # Override the storage default for `infer`: the kernel backends only
-    # handle ``fastpacked`` (4 trits/byte). Force it here so users don't
-    # have to know the implementation detail.
-    p_infer.set_defaults(storage="fastpacked")
+    # Note: do NOT use set_defaults(storage=...) here.  With ``parents=[common]``
+    # argparse leaks that default to every other subcommand.  The storage
+    # fallback for `infer` is handled in _infer() via _storage(args, "fastpacked").
     p_infer.add_argument(
         "--backend",
         choices=["auto", "torch", "triton", "cpu_cpp", "numpy"],
@@ -292,7 +297,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _reconfigure_stdout_utf8() -> None:
+    """Force UTF-8 output on Windows so console output never crashes
+    with UnicodeEncodeError on legacy cp1252 code pages."""
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, ValueError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _reconfigure_stdout_utf8()
     args = build_parser().parse_args(argv)
     cmd = args.command
     if cmd is None:

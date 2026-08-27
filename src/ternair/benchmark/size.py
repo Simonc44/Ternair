@@ -9,13 +9,13 @@ Storage accounting (per linear)
 
 For a ternary linear ``nn.Linear(out_features, in_features)``:
 
-* The internal weight has ``out_features × in_features`` ternary
-  parameters. After per-row scaling ``γ = mean(|W|)`` the weight
+* The internal weight has ``out_features x in_features`` ternary
+  parameters. After per-row scaling ``gamma = mean(|W|)`` the weight
   tensor is quantised to ``{-1, 0, 1}``.
 * In ``"packed"`` storage we keep 5 trits per byte (1.6 bits/value).
 * In ``"int8"`` storage we keep 1 trit per byte (8 bits/value).
-* One FP32 ``γ`` per *output row* (not per weight) - so ``out_features``
-  scalars. This dominates γ only for tiny hidden sizes.
+* One FP32 ``gamma`` per *output row* (not per weight) - so ``out_features``
+  scalars. This dominates gamma only for tiny hidden sizes.
 
 Embedding and LM head
 ---------------------
@@ -40,7 +40,7 @@ class SizeBreakdown:
     ternary_linear_scales_bytes: int
     embedding_bytes: int
     lm_head_bytes: int
-    other_bytes: int  # RMSNorm γ, embedding scale, … (FP32)
+    other_bytes: int  # RMSNorm gamma, embedding scale, ... (FP32)
     total_bytes: int
     ternary_param_count: int
 
@@ -77,8 +77,8 @@ def _ternary_params_per_layer(config: TernairConfig) -> int:
 def _outputs_per_layer(config: TernairConfig) -> int:
     """Total ``out_features`` across all linears of one decoder block.
 
-    ``γ`` is one FP32 scalar per output row, so the total number of
-    γ scales per layer is just the sum of ``out_features``.
+    ``gamma`` is one FP32 scalar per output row, so the total number of
+    gamma scales per layer is just the sum of ``out_features``.
     """
     H = config.hidden_size
     I = config.intermediate_size
@@ -115,7 +115,7 @@ def model_size_bytes(
 
     ternary_weight_bytes = int(round(ternary_count * (bits_per_value / 8.0)))
 
-    # γ is one scalar per output row, summed across the seven linears.
+    # gamma is one scalar per output row, summed across the seven linears.
     outputs_per_layer = _outputs_per_layer(config)
     scale_bytes = outputs_per_layer * config.num_hidden_layers * 4
 
@@ -129,7 +129,7 @@ def model_size_bytes(
         else 0
     )
 
-    # RMSNorm γ weights: 1×H FP32 per layer + final norm. Negligible.
+    # RMSNorm gamma weights: 1xH FP32 per layer + final norm. Negligible.
     other_bytes = (config.num_hidden_layers + 1) * config.hidden_size * 4
 
     total = (
@@ -193,7 +193,7 @@ def auto_fit_to_bytes(
 
         total = fixed_bytes + per_layer_bytes * num_hidden_layers
 
-    where ``per_layer_bytes`` covers weights + γ scales + RMSNorm, and
+    where ``per_layer_bytes`` covers weights + gamma scales + RMSNorm, and
     ``fixed_bytes`` covers the embedding and the final norm.
     """
     per_layer_params = _ternary_params_per_layer(base)
@@ -202,7 +202,7 @@ def auto_fit_to_bytes(
 
     per_layer_bytes = (
         per_layer_params * (bits_per_value / 8.0)
-        + per_layer_outputs * 4  # γ scales (FP32)
+        + per_layer_outputs * 4  # gamma scales (FP32)
         + base.hidden_size * 4  # 1 RMSNorm (FP32) per layer
     )
     if per_layer_bytes <= 0:

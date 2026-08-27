@@ -6,12 +6,12 @@ Usage::
 
 Endpoints
 ---------
-* ``POST /v1/completions`` — text completion (single prompt).
-* ``POST /v1/chat/completions`` — chat completion.
-* ``POST /v1/batch`` — batch completion (multiple prompts in parallel).
-* ``GET  /v1/models`` — list available models.
-* ``GET  /health`` — health check.
-* ``GET  /metrics`` — Prometheus-compatible metrics.
+* ``POST /v1/completions`` - text completion (single prompt).
+* ``POST /v1/chat/completions`` - chat completion.
+* ``POST /v1/batch`` - batch completion (multiple prompts in parallel).
+* ``GET  /v1/models`` - list available models.
+* ``GET  /health`` - health check.
+* ``GET  /metrics`` - Prometheus-compatible metrics.
 
 Dynamic batching: ``POST /v1/batch`` accepts ``{"prompts": [...], "max_tokens": N}``
 and processes all prompts concurrently with a thread pool, returning results

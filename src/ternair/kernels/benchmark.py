@@ -93,7 +93,7 @@ def main() -> None:
     M_str, N_str = args.size.lower().split("x")
     M, N = int(M_str), int(N_str)
 
-    print(f"Benchmark:  {M}×{N}  packed ternary matmul  ({args.trials} trials)")
+    print(f"Benchmark:  {M}x{N}  packed ternary matmul  ({args.trials} trials)")
     print("-" * 60)
 
     res = run_benchmark(M, N, trials=args.trials)
