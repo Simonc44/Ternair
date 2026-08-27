@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ternair.model.config import TernairConfig
+from ternair.model.norm import RMSNorm
 from ternair.quantization.activation import quantize_activations_8bit_forward
 from ternair.quantization.linear import TernairLinear
 
@@ -98,6 +99,12 @@ class TernairAttention(nn.Module):
         self.v_proj = TernairLinear(S, KV * D, bias=False, storage=config.storage)
         self.o_proj = TernairLinear(H * D, S,  bias=False, storage=config.storage)
 
+        # BitNet b1.58 sub-layer normalisation: applied on the attention
+        # output before the o_proj projection.
+        self._use_sub_norm: bool = bool(getattr(config, "use_sub_norm", False))
+        if self._use_sub_norm:
+            self.attn_sub_norm = RMSNorm(H * D, eps=config.rms_norm_eps)
+
         self._kv_cache_k: Tensor | None = None
         self._kv_cache_v: Tensor | None = None
         self._kv_cache_len: int = 0
@@ -180,6 +187,8 @@ class TernairAttention(nn.Module):
         )  # (B, H, T, D)
 
         ctx = ctx.transpose(1, 2).contiguous().view(B, T, H * D)
+        if self._use_sub_norm:
+            ctx = self.attn_sub_norm(ctx)
         ctx_q = quantize_activations_8bit_forward(ctx)
         return self.o_proj(ctx_q)
 

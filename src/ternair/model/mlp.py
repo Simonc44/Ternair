@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ternair.model.config import TernairConfig
+from ternair.model.norm import RMSNorm
 from ternair.quantization.activation import quantize_activations_8bit_forward
 from ternair.quantization.linear import TernairLinear
 
@@ -52,12 +53,20 @@ class TernairMLP(nn.Module):
         self.down_proj = TernairLinear(I, S, bias=False, storage=config.storage)
         self.act = SiLU()
 
+        # BitNet b1.58 sub-layer normalisation: applied on the gated
+        # product before the down_proj projection.
+        self._use_sub_norm: bool = bool(getattr(config, "use_sub_norm", False))
+        if self._use_sub_norm:
+            self.ffn_sub_norm = RMSNorm(I, eps=config.rms_norm_eps)
+
     def forward(self, x: Tensor) -> Tensor:
         # 8-bit activation quantisation before projection (BitNet paper)
         x_q = quantize_activations_8bit_forward(x)
         gate = self.gate_proj(x_q)
         up = self.up_proj(x_q)
         h = self.act(gate) * up
+        if self._use_sub_norm:
+            h = self.ffn_sub_norm(h)
         # Quantise before output projection
         h_q = quantize_activations_8bit_forward(h)
         return self.down_proj(h_q)

@@ -8,19 +8,7 @@ from torch import Tensor, nn
 from ternair.model.attention import TernairAttention, _build_rope_cache
 from ternair.model.config import TernairConfig
 from ternair.model.mlp import TernairMLP
-from ternair.quantization.activation import quantize_activations_8bit_forward
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
-        var = x.float().pow(2).mean(dim=-1, keepdim=True)
-        x = x.float() * torch.rsqrt(var + self.eps)
-        return (x * self.weight).to(x.dtype)
+from ternair.model.norm import RMSNorm  # re-exported below for back-compat
 
 
 class TernairBlock(nn.Module):

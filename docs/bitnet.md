@@ -65,3 +65,22 @@ asserts the converted model produces matching logits. Because both paths
 apply the same `round(clamp(W/gamma, -1, 1)) × gamma` ternarisation and the
 same packing, the converted model behaves exactly like the frozen BitNet
 model.
+
+The official BitNet b1.58 **sub-layer normalisation** (`attn_sub_norm`
+before the output projection, `ffn_sub_norm` before the down projection) is
+detected from the checkpoint keys and enabled automatically, so converted
+models follow the exact official architecture.
+
+## CI validation of the real checkpoint
+
+The workflow `.github/workflows/bitnet-convert.yml` validates the
+converted 2B-4T end-to-end on demand (GitHub UI → Actions →
+`bitnet-convert` → Run workflow): download → convert → parity check vs the
+HuggingFace reference → upload the converted package as an artifact.
+
+Locally, the same checks run with:
+
+```bash
+python scripts/verify_bitnet_parity.py --source ./bitnet-2b4t --output ./ternair-2b4t
+python scripts/bench_vs_bitnet.py --source ./bitnet-2b4t --output ./ternair-2b4t
+```

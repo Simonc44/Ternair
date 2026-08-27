@@ -197,6 +197,7 @@ def build_hf_config(ternair_config: TernairConfig) -> dict:
         "tie_word_embeddings": ternair_config.tie_word_embeddings,
         "storage": ternair_config.storage,
         "attn_layer_period": ternair_config.attn_layer_period,
+        "use_sub_norm": bool(getattr(ternair_config, "use_sub_norm", False)),
         "ssm_dim": ternair_config.ssm_dim,
         "thalamus_k": getattr(ternair_config, "thalamus_k", 32),
         "thalamus_heads": getattr(ternair_config, "thalamus_heads", 4),

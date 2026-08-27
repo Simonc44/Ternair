@@ -1,0 +1,91 @@
+name: bitnet-convert
+
+# Validates the trained-model path end-to-end on a real BitNet b1.58
+# checkpoint: download -> convert with Ternair -> parity check vs the
+# HuggingFace reference -> (optional) perplexity.  Runs on demand because
+# the 2B-4T checkpoint is ~5 GB.
+on:
+  workflow_dispatch:
+    inputs:
+      model_id:
+        description: HuggingFace BitNet b1.58 model id
+        required: false
+        default: microsoft/bitnet-b1.58-2B-4T
+      storage:
+        description: Ternair storage format
+        required: false
+        default: packed
+        type: choice
+        options:
+          - packed
+          - fastpacked
+      min_correlation:
+        description: Minimum logit Pearson correlation to pass
+        required: false
+        default: "0.7"
+      run_perplexity:
+        description: Also measure WikiText-2 perplexity of the converted model
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  convert-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install transformers safetensors huggingface_hub datasets
+
+      - name: Download BitNet checkpoint
+        run: |
+          huggingface-cli download "${{ inputs.model_id }}" --local-dir ./bitnet-checkpoint
+          ls -la ./bitnet-checkpoint | head -20
+
+      - name: Convert with Ternair
+        run: |
+          python -m ternair import-bitnet \
+            --source ./bitnet-checkpoint \
+            --output ./ternair-converted \
+            --storage "${{ inputs.storage }}"
+          ls -la ./ternair-converted
+
+      - name: Verify parity vs HuggingFace reference
+        env:
+          HF_HUB_DISABLE_TELEMETRY: "1"
+        run: |
+          python scripts/verify_bitnet_parity.py \
+            --source ./bitnet-checkpoint \
+            --output ./ternair-converted \
+            --storage "${{ inputs.storage }}" \
+            --min-correlation "${{ inputs.min_correlation }}" \
+            --json ./parity-report.json
+          cat ./parity-report.json
+
+      - name: Measure perplexity (optional)
+        if: inputs.run_perplexity == 'true'
+        run: |
+          python scripts/verify_bitnet_parity.py \
+            --source ./bitnet-checkpoint \
+            --output ./ternair-converted \
+            --storage "${{ inputs.storage }}" \
+            --wikitext ./wikitext-2-raw.txt \
+            --max-eval-tokens 4096 \
+            --json ./parity-report-with-ppl.json || true
+
+      - name: Upload converted package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ternair-${{ inputs.model_id }}-${{ inputs.storage }}
+          path: |
+            ternair-converted/
+            parity-report.json
+          if-no-files-found: error

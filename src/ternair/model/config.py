@@ -39,6 +39,10 @@ class TernairConfig:
     moe_layer_period: int = 0  # 0 = desactive
     # KV-Cache quantifie (BitAttention)
     kv_cache_bits: int = 0  # 0 = pas de quant KV, 2 = 2-bit, 4 = 4-bit
+    # BitNet b1.58 sub-layer normalisation (official architecture):
+    #   attn: out = attn_sub_norm(attn_out) before o_proj
+    #   mlp : out = ffn_sub_norm(silu(gate(x)) * up(x)) before down_proj
+    use_sub_norm: bool = False
     # rope scaling could be added here if we want to extend prototypes
     extra: dict = field(default_factory=dict)
 

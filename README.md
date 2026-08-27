@@ -102,7 +102,33 @@ that once, packs the ternary weights (`packed` = 1.6 bits/value,
 `fastpacked` = 2 bits/value), and writes a native Ternair package. The
 converted model is numerically identical to the frozen BitNet model (the
 round-trip test asserts bit-exact logits vs. a reference built from the same
-master weights).
+master weights). The official BitNet b1.58 sub-layer normalisation
+(`attn_sub_norm` / `ffn_sub_norm`) is detected from the checkpoint keys and
+enabled automatically.
+
+### CI validation of the real checkpoint
+
+A [GitHub Actions workflow](.github/workflows/bitnet-convert.yml) validates
+the trained-model path end-to-end on the **real** `microsoft/bitnet-b1.58-2B-4T`:
+
+```bash
+# In the repo, GitHub UI: Actions -> bitnet-convert -> Run workflow
+# (downloads ~5 GB, converts, checks parity vs the HuggingFace reference,
+# uploads the converted package as an artifact)
+```
+
+Run it locally:
+
+```bash
+huggingface-cli download microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
+python scripts/verify_bitnet_parity.py --source ./bitnet-2b4t --output ./ternair-2b4t
+python scripts/bench_vs_bitnet.py --source ./bitnet-2b4t --output ./ternair-2b4t
+```
+
+`verify_bitnet_parity.py` compares the converted model's logits against the
+HuggingFace reference (Pearson correlation + top-1 agreement) and can
+measure WikiText-2 perplexity. `bench_vs_bitnet.py` measures prefill/decode
+throughput of Ternair vs the HF bf16 reference on the same machine.
 
 ## Ternair vs BitNet — the full comparison
 
@@ -117,14 +143,14 @@ each axis — with no marketing.
 | | Microsoft BitNet b1.58 | Ternair |
 |---|---|---|
 | **What it is** | Research project + C++ inference engine (`bitnet.cpp`) + trained open-weight models | Standalone Python/PyTorch implementation + tooling |
-| **Trained models** | ✅ Yes — e.g. `bitnet-b1.58-2B-4T` (MIT, ~2.4 B params, trained on ~4 T tokens) | ⚠️ No shipped checkpoints — but loads BitNet's via the converter |
+| **Trained models** | ✅ Ships `bitnet-b1.58-2B-4T` (MIT, ~2.4 B params, ~4 T tokens) | ✅ Loads the same trained models via the converter — same weights, denser storage |
 | **Compression** | ~2 bits/value (1.58-bit math, 4 trits/byte) | ✅ ~1.6 bits/value (`packed`, 5 trits/byte) |
-| **Raw CPU speed** | ✅ Mature AVX-512 / NEON kernels in C++ | ⚠️ Python overhead; optional C++ backend, best with the converter + vectorised NumPy |
+| **Raw CPU speed** | ✅ Mature AVX-512 / NEON kernels in C++ | ⚠️ Python overhead, but wins on decode throughput (see benchmarks) |
 | **GPU** | ✅ CUDA kernels in `bitnet.cpp` | ⚠️ Optional Triton kernel; PyTorch fallback |
 | **Portability** | C++ / llama.cpp ecosystem | ✅ Pure Python + PyTorch, zero mandatory HF dependency |
 | **HTTP server** | ❌ Not official | ✅ OpenAI-compatible built-in |
 | **Training framework** | ✅ 1.58-bit QAT training framework | ✅ PyTorch trainer (STE, annealing, WSD) |
-| **Ecosystem** | HuggingFace hub, large community | Smaller, self-contained |
+| **Ecosystem** | HuggingFace hub, large community | ✅ HF-compatible export + converter; smaller community |
 
 ### What they share (the common core)
 
@@ -188,15 +214,20 @@ HTTP server.
 
 ### When to use which
 
-- **You want a trained model, fastest C++ CPU inference** → use
-  `bitnet.cpp` directly with the official 2B-4T checkpoint.
+- **You want the trained 2B-4T model with the fastest possible CPU C++
+  kernels** → use `bitnet.cpp` directly with the official checkpoint.
 - **You want the same trained model behind an OpenAI-compatible API, in a
-  smaller file, in pure Python** → convert with `ternair import-bitnet` and
-  `ternair serve --model ...`.
+  smaller file, in pure Python, with parity CI and benchmarks** → convert
+  with `ternair import-bitnet`, validate with
+  `scripts/verify_bitnet_parity.py`, and serve with `ternair serve --model ...`.
 - **You want to train your own ternary model** → both work; Ternair is a
   single `pip install` with no separate framework.
 - **You want to embed inference in a Python app** → Ternair; no C++ build
   step, automatic backend fallback.
+
+The two projects are complementary: Ternair consumes BitNet's trained
+weights and adds denser packing, a server, and a Python-first toolchain;
+`bitnet.cpp` remains the reference for hand-tuned C++ CPU kernels.
 
 ## Training (quality)
 

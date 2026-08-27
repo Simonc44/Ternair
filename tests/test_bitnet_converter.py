@@ -158,6 +158,56 @@ def test_fidelity_against_master_weights(tmp_path):
     assert max_diff < 1e-3, f"frozen logits diverged: max_diff={max_diff}"
 
 
+def test_parity_with_transformers_bitnet(tmp_path):
+    """Converted model must stay close to the real HF BitNetForCausalLM.
+
+    transformers' BitNet keeps master bf16 weights (no on-the-fly
+    ternarisation in 5.x), so this is a *quality* check: the ternary
+    model must preserve the ranking of the bf16 model, not be bit-equal.
+    """
+    pytest.importorskip("transformers")
+    from transformers.models.bitnet import BitNetConfig, BitNetForCausalLM
+
+    torch.manual_seed(0)
+    cfg = BitNetConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+        max_position_embeddings=128, rope_theta=10000.0, rms_norm_eps=1e-5,
+        tie_word_embeddings=True, torch_dtype=torch.bfloat16,
+    )
+    hf_model = BitNetForCausalLM(cfg).to(torch.bfloat16)
+    src = tmp_path / "bitnet-hf"
+    src.mkdir()
+    hf_model.save_pretrained(str(src))
+    out = tmp_path / "ternair-hf"
+
+    report = convert_bitnet_checkpoint(str(src), str(out), storage="packed")
+    assert report.as_dict()["n_ignored_tensors"] == 0, report.as_dict()["ignored_keys"]
+
+    ids = torch.tensor([[1, 5, 20, 3, 42]], dtype=torch.long)
+    hf_model.eval()
+    with torch.no_grad():
+        ref = hf_model(ids).logits.float()
+    t_model, _ = load_converted_model(str(out), device="cpu")
+    with torch.no_grad():
+        got = t_model(ids).float()
+
+    # Structure preservation: Pearson correlation between the bf16 and the
+    # ternary logits.  On a *random* model the logits are near-uniform so
+    # top-1 agreement is meaningless; on a trained checkpoint (the real
+    # 2B-4T) we expect correlation ~1.0 and high top-1 agreement.
+    rf = ref.flatten().float()
+    gf = got.flatten().float()
+    rf = rf - rf.mean()
+    gf = gf - gf.mean()
+    corr = float(((rf * gf).sum() / (rf.norm() * gf.norm() + 1e-8)).item())
+    assert corr > 0.5, f"logit correlation too low: {corr}"
+
+    # Sanity: outputs are finite and same-shaped.
+    assert ref.shape == got.shape
+    assert torch.isfinite(got).all()
+
+
 def test_fastpacked_storage_conversion(tmp_path):
     src = tmp_path / "bitnet"
     out = tmp_path / "ternair-fast"

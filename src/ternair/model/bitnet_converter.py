@@ -57,6 +57,9 @@ _LAYER_KEY_MAP = {
     "self_attn.k_proj.weight": "attn.k_proj.weight",
     "self_attn.v_proj.weight": "attn.v_proj.weight",
     "self_attn.o_proj.weight": "attn.o_proj.weight",
+    # BitNet b1.58 sub-layer norms (official architecture).
+    "self_attn.attn_sub_norm.weight": "attn.attn_sub_norm.weight",
+    "mlp.ffn_sub_norm.weight": "mlp.ffn_sub_norm.weight",
     "post_attention_layernorm.weight": "ln_2.weight",
     "mlp.gate_proj.weight": "mlp.gate_proj.weight",
     "mlp.up_proj.weight": "mlp.up_proj.weight",
@@ -162,6 +165,7 @@ def bitnet_config_to_ternair(hf_config: dict[str, Any], storage: str = "packed")
         num_experts=1,
         moe_layer_period=0,
         kv_cache_bits=int(_get("kv_cache_bits", default=0)),
+        use_sub_norm=bool(_get("use_sub_norm", default=False)),
         extra={
             "source_model_type": _get("model_type", default="bitnet"),
             "source_architectures": _get("architectures", default=[]),
@@ -311,6 +315,19 @@ def convert_bitnet_checkpoint(
             tensors.update(torch.load(path, map_location="cpu", weights_only=True))
         else:
             tensors.update(_load_safetensors_dict(path))
+
+    # Detect BitNet b1.58 sub-layer norms from the checkpoint keys and
+    # enable them in the config if present (official 2B-4T architecture).
+    has_attn_sub_norm = any(k.endswith("self_attn.attn_sub_norm.weight") for k in tensors)
+    has_ffn_sub_norm = any(k.endswith("mlp.ffn_sub_norm.weight") for k in tensors)
+    if has_attn_sub_norm or has_ffn_sub_norm:
+        if not ternair_config.use_sub_norm:
+            _LOGGER.info(
+                "Checkpoint has sub-layer norms (attn=%s ffn=%s); enabling use_sub_norm",
+                has_attn_sub_norm, has_ffn_sub_norm,
+            )
+            ternair_config.use_sub_norm = True
+            model = TernairForCausalLM(ternair_config)
 
     # Copy master weights into the Ternair model (embedding, norms, linears).
     n_loaded = 0
