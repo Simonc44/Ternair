@@ -97,7 +97,15 @@ def main() -> int:
         from ternair import TernairForCausalLM, tiny_profile
         from ternair.model.bitnet_converter import bitnet_config_to_ternair
 
-        ternair_model = TernairForCausalLM(tiny_profile(storage="packed"))
+        # IMPORTANT: use the attention-pure config (no SSM layers) so the
+        # comparison is architecture-for-architecture identical to BitNet
+        # (BitNet b1.58 is a plain GQA transformer).  The default ``tiny``
+        # profile mixes in SSM blocks, which are a different architecture
+        # and would make the benchmark unfair.
+        cfg = tiny_profile(storage="packed")
+        cfg.num_attn_layers = cfg.num_hidden_layers
+        cfg.attn_layer_period = 1
+        ternair_model = TernairForCausalLM(cfg)
         ternair_model.freeze_storage()
         vocab = ternair_model.config.vocab_size
 

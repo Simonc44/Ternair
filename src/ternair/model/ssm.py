@@ -1,14 +1,22 @@
 """Ternary Selective State-Space block with parallel scan.
 
-Fixes vs previous version
---------------------------
-* Clamped log_A_cumsum before exp() to avoid overflow with random init.
-  Without clamp, exp(large positive) = inf on the first forward pass
-  when delta and A_log are random.
-* Added output clamp to prevent NaN propagation downstream.
+Numerical design
+----------------
+* Per-step log-decay is clamped to [-_LOG_CLAMP, 0] before exp(): a
+  positive A at init (or a large negative delta*A) would otherwise make
+  exp() overflow.  Clamping each *step* -- not the cumulative sum --
+  preserves the differences S_t - S_i that the scan needs.
+* The sequence is processed in fixed-size chunks: inside a chunk the
+  anti-decay exp(-S) stays <= exp(4 * 20) = exp(80) < float32 max, so
+  the decay/anti-decay decomposition is exact.  Across chunks a short
+  sequential carry propagates the state; every value there is bounded
+  (decay <= 1, state ~ O(|dBx|)), so it never overflows either.
+* Output clamp prevents NaN propagation downstream (safety net only).
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn.functional as F
@@ -18,9 +26,14 @@ from ternair.model.config import TernairConfig
 from ternair.quantization.activation import quantize_activations_8bit_forward
 from ternair.quantization.linear import TernairLinear
 
-# Maximum absolute value for log_A_cumsum before exp()
-# exp(20) ≈ 4.8e8, well within float32 range
+# Maximum absolute value of a single log-decay step before exp().
+# exp(20) ~= 4.8e8, well within float32 range.
 _LOG_CLAMP = 20.0
+
+# Chunk size for the parallel scan.  Within a chunk the anti-decay
+# exp(-S) is bounded by exp(BC * _LOG_CLAMP); BC * _LOG_CLAMP must stay
+# below ~88 (the fp32 exp() overflow threshold), so BC = 4 is safe.
+_SCAN_CHUNK = 4
 
 
 def _selective_scan_parallel(
@@ -50,27 +63,52 @@ def _selective_scan_parallel(
     A = A.to(dtype=dtype, device=device)
 
     delta_4d = delta.unsqueeze(-1)                              # (B, L, D, 1)
-    log_A_bar = delta_4d * A.view(1, 1, 1, N)                  # (B, L, D, N)
-
-    # FIX: clamp log_A_cumsum before exp() to avoid overflow with random init.
-    # A is supposed to be negative (stable system), but at init A_log can be
-    # positive, making log_A_bar positive too. Without clamp:
-    # exp(large positive) = inf → h = inf → y = NaN.
-    log_A_bar = torch.clamp(log_A_bar, max=0.0)  # A must be negative for stability
+    log_A_bar = torch.clamp(
+        delta_4d * A.view(1, 1, 1, N),
+        min=-_LOG_CLAMP,
+        max=0.0,
+    )                                                        # (B, L, D, N)
 
     dBx = delta_4d * B.unsqueeze(2) * x.unsqueeze(-1)          # (B, L, D, N)
 
-    log_A_cumsum = torch.cumsum(log_A_bar, dim=1)               # (B, L, D, N)
-    log_A_cumsum = torch.clamp(log_A_cumsum, min=-_LOG_CLAMP, max=0.0)
+    # ------------------------------------------------------------------
+    # Chunked scan: within-chunk parallel decomposition (exact) + a short
+    # sequential carry across chunks (bounded).  See module docstring.
+    # ------------------------------------------------------------------
+    BC = _SCAN_CHUNK
+    L_orig = L
+    if L % BC:
+        # F.pad pads pairs from the LAST dimension backwards, so six
+        # entries = (N: 0, 0), (D: 0, 0), (L: 0, pad).
+        pad = BC - (L % BC)
+        log_A_bar = F.pad(log_A_bar, (0, 0, 0, 0, 0, pad))
+        dBx = F.pad(dBx, (0, 0, 0, 0, 0, pad))
+        L = L + pad
+    n_chunks = L // BC
+    lb = log_A_bar.view(B_size, n_chunks, BC, D_size, N)       # (B, C, BC, D, N)
+    dbx = dBx.view(B_size, n_chunks, BC, D_size, N)
 
-    decay_term   = torch.exp(log_A_cumsum)                      # in (0, 1]
-    anti_decay   = torch.exp(-log_A_cumsum)                     # in [1, inf)
-    # clamp anti_decay to avoid blow-up when log_A_cumsum is near zero
-    anti_decay   = torch.clamp(anti_decay, max=math.exp(_LOG_CLAMP))
+    S_local = torch.cumsum(lb, dim=2)                          # (B, C, BC, D, N)
+    decay_local = torch.exp(S_local)                           # in (0, 1]
+    anti_local = torch.exp(-S_local)                           # <= exp(80), exact
+    G_local = torch.cumsum(anti_local * dbx, dim=2)
+    h_local = decay_local * G_local                            # (B, C, BC, D, N)
 
-    weighted_dBx    = anti_decay * dBx
-    weighted_cumsum = torch.cumsum(weighted_dBx, dim=1)
-    h = decay_term * weighted_cumsum                            # (B, L, D, N)
+    h_end = h_local[:, :, -1]                                  # (B, C, D, N)
+    decay_end = decay_local[:, :, -1]                          # (B, C, D, N)
+
+    # Sequential carry: state_c is the hidden state at the end of chunk
+    # c-1.  Only O(n_chunks) tiny (B, D, N) ops -- negligible next to the
+    # vectorised within-chunk work.
+    state = torch.zeros(B_size, D_size, N, dtype=dtype, device=device)
+    states = [state]
+    for c in range(n_chunks):
+        state = decay_end[:, c] * state + h_end[:, c]
+        states.append(state)
+    state_stack = torch.stack(states[:-1], dim=1)              # (B, C, D, N)
+
+    h = decay_local * state_stack.unsqueeze(2) + h_local       # (B, C, BC, D, N)
+    h = h.reshape(B_size, n_chunks * BC, D_size, N)[:, :L_orig]
 
     y = (C.unsqueeze(2) * h).sum(dim=-1)                       # (B, L, D)
 
@@ -80,9 +118,6 @@ def _selective_scan_parallel(
     # Final clamp to prevent NaN propagation if any residual instability
     y = torch.nan_to_num(y, nan=0.0, posinf=1e4, neginf=-1e4)
     return y
-
-
-import math
 
 
 class TernarySSMBlock(nn.Module):
@@ -119,10 +154,14 @@ class TernarySSMBlock(nn.Module):
         xz   = self.x_proj(x_q)                                  # (B, L, 2H)
         x_gate, z = xz.chunk(2, dim=-1)                          # (B, L, H) each
 
-        dt_r  = self.dt_rank_proj(quantize_activations_8bit_forward(x_gate))
+        # NOTE: quantise x_gate once and reuse it for the three projections
+        # (dt_rank / B / C).  Quantising the same tensor three times is
+        # redundant work and measurably slows down prefill.
+        x_gate_q = quantize_activations_8bit_forward(x_gate)
+        dt_r  = self.dt_rank_proj(x_gate_q)
         delta  = F.softplus(self.dt_proj(dt_r))                  # (B, L, H) > 0
-        B_s    = self.B_proj(quantize_activations_8bit_forward(x_gate))  # (B, L, N)
-        C_s    = self.C_proj(quantize_activations_8bit_forward(x_gate))  # (B, L, N)
+        B_s    = self.B_proj(x_gate_q)                            # (B, L, N)
+        C_s    = self.C_proj(x_gate_q)                            # (B, L, N)
 
         # A = -exp(A_log) is always negative → stable system
         A = -torch.exp(self.A_log.to(dtype=x.dtype, device=x.device))   # (N,)

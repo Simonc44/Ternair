@@ -150,6 +150,20 @@ class TestParallelScanEquivalence:
             diff = (out_batch[i] - out_i[0]).abs().max().item()
             assert diff < 1e-5, f"Batch item {i} differs: {diff:.2e}"
 
+    def test_parallel_matches_sequential_small_A(self):
+        """With moderate A (no exp() overflow) the parallel scan is bit-close."""
+        torch.manual_seed(7)
+        B, L, D, N = 2, 24, 12, 3
+        x = torch.randn(B, L, D)
+        delta = F.softplus(torch.randn(B, L, D)) * 0.1
+        A = -torch.exp(torch.arange(1, N + 1, dtype=torch.float32))  # max |A| = e^3 ~ 20
+        Bm = torch.randn(B, L, N)
+        C = torch.randn(B, L, N)
+        out_seq = _selective_scan_sequential(x, delta, A, Bm, C, None)
+        out_par = _selective_scan_parallel(x, delta, A, Bm, C, None)
+        max_diff = (out_seq - out_par).abs().max().item()
+        assert max_diff < 1e-4, f"small-A parallel diff too large: {max_diff:.2e}"
+
     def test_stable_with_large_delta(self, device):
         """Scan remains numerically stable with large delta values."""
         torch.manual_seed(0)

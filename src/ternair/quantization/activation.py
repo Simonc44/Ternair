@@ -159,6 +159,12 @@ def quantize_activations_8bit_forward(
         x = apply_hadamard_transform(x, dim=-1)
         out = _ActivationQuantFn.apply(x)
         return apply_inverse_hadamard(out, dim=-1)
+    if not x.requires_grad:
+        # Fast eval/inference path: no autograd wrapper needed, so skip the
+        # Function dispatch overhead.  Identical math to _ActivationQuantFn.
+        absmax = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-5)
+        scale = absmax / 127.0
+        return torch.clamp(torch.round(x / scale), -128.0, 127.0) * scale
     return _ActivationQuantFn.apply(x)
 
 
