@@ -104,6 +104,100 @@ converted model is numerically identical to the frozen BitNet model (the
 round-trip test asserts bit-exact logits vs. a reference built from the same
 master weights).
 
+## Ternair vs BitNet — the full comparison
+
+Ternair is **not a competitor to BitNet**: it is a compatible, standalone
+implementation of the *same idea* (BitNet b1.58), and it can even load
+BitNet's trained models directly (see above). This section lays out exactly
+what each project is, what they share, where they differ, and who wins on
+each axis — with no marketing.
+
+### TL;DR
+
+| | Microsoft BitNet b1.58 | Ternair |
+|---|---|---|
+| **What it is** | Research project + C++ inference engine (`bitnet.cpp`) + trained open-weight models | Standalone Python/PyTorch implementation + tooling |
+| **Trained models** | ✅ Yes — e.g. `bitnet-b1.58-2B-4T` (MIT, ~2.4 B params, trained on ~4 T tokens) | ⚠️ No shipped checkpoints — but loads BitNet's via the converter |
+| **Compression** | ~2 bits/value (1.58-bit math, 4 trits/byte) | ✅ ~1.6 bits/value (`packed`, 5 trits/byte) |
+| **Raw CPU speed** | ✅ Mature AVX-512 / NEON kernels in C++ | ⚠️ Python overhead; optional C++ backend, best with the converter + vectorised NumPy |
+| **GPU** | ✅ CUDA kernels in `bitnet.cpp` | ⚠️ Optional Triton kernel; PyTorch fallback |
+| **Portability** | C++ / llama.cpp ecosystem | ✅ Pure Python + PyTorch, zero mandatory HF dependency |
+| **HTTP server** | ❌ Not official | ✅ OpenAI-compatible built-in |
+| **Training framework** | ✅ 1.58-bit QAT training framework | ✅ PyTorch trainer (STE, annealing, WSD) |
+| **Ecosystem** | HuggingFace hub, large community | Smaller, self-contained |
+
+### What they share (the common core)
+
+BitNet b1.58 and Ternair implement the **same recipe**, so weights are
+interchangeable:
+
+- **Ternary weights** `{-1, 0, +1}` with per-output-row scale
+  `gamma = mean(|W|)` (absmean quantisation).
+- **Per-token 8-bit absmax activation quantisation**.
+- **Straight-through estimator (STE)** for training.
+- **LLaMA-style decoder**: RMSNorm, RoPE, GQA attention, SwiGLU MLP.
+- Same causal decoding with KV-cache.
+
+This is why a trained BitNet checkpoint can be converted to Ternair with
+bit-exact fidelity instead of being re-trained.
+
+### Where they actually differ
+
+**1. What ships in the box.**
+BitNet is a research program: papers ("The Era of 1-bit LLMs"), the
+`bitnet.cpp` C++ inference engine, and trained open-weight models on the
+HuggingFace hub. Ternair is a single installable Python package that ships
+the full stack: model, quantisation, packing, training, export, server.
+
+**2. Packing density.**
+Ternair's `packed` storage uses a base-3 codec with **5 trits per byte
+(1.6 bits/value)** vs the 4 trits per byte (2 bits/value) of a plain 2-bit
+codec. On the same ternary weights, Ternair is ~20% smaller on disk.
+`fastpacked` (2 bits/value) exists for kernels that need the simpler layout.
+
+**3. Inference backends.**
+`bitnet.cpp` is C++ with hand-tuned AVX-512/NEON kernels — the reference for
+CPU ternary speed. Ternair runs everywhere PyTorch runs and picks a backend
+per device: Triton on CUDA, C++ when available, vectorised NumPy otherwise,
+with the PyTorch path as the always-correct fallback. A cached dequantisation
+makes the frozen PyTorch path ~900x faster than the naive unpack-every-forward
+approach.
+
+**4. Speed on commodity hardware — the honest truth.**
+On a standard GPU, neither ternary implementation beats cuBLAS FP16 for
+compute-bound workloads: GPUs are built for dense FP16 matmuls, and
+add/subtract ternary matmuls are memory-bound. Ternary wins in the
+**memory-bound regime**: batch=1 decode, long context, and bit-level CPU
+SIMD (AVX-512) or specialised hardware (FPGA/ASIC). Do not trust any
+benchmark — including ours — without measuring on your target machine.
+
+**5. Quality.**
+BitNet ships a *trained* 2B-4T model with real perplexity. Ternair's
+shipped profiles are randomly initialised; the `train` path exists to train
+your own. The honest quality comparison today:
+
+- Same trained weights (via converter): **identical quality**, smaller files.
+- Trained from scratch: Ternair matches BitNet's recipe; final quality is a
+  function of data + compute, not of the implementation.
+
+**6. Operations.**
+Ternair has an OpenAI-compatible HTTP server (`/v1/completions`,
+`/v1/chat/completions`, `/v1/batch`, `/metrics`) and atomic SafeTensors
+export. `bitnet.cpp` provides a CLI and llama.cpp-style tooling; no official
+HTTP server.
+
+### When to use which
+
+- **You want a trained model, fastest C++ CPU inference** → use
+  `bitnet.cpp` directly with the official 2B-4T checkpoint.
+- **You want the same trained model behind an OpenAI-compatible API, in a
+  smaller file, in pure Python** → convert with `ternair import-bitnet` and
+  `ternair serve --model ...`.
+- **You want to train your own ternary model** → both work; Ternair is a
+  single `pip install` with no separate framework.
+- **You want to embed inference in a Python app** → Ternair; no C++ build
+  step, automatic backend fallback.
+
 ## Training (quality)
 
 Ternair is also a *training* framework: the shipped profiles are randomly initialised. Quality comparable to BitNet requires training, which is exactly what the training path is for.
@@ -194,12 +288,7 @@ Measured on this project's tiny profile (CPU, after the dequantisation-cache and
 | Decode throughput (packed) | ~61 k tokens/s |
 | Decode throughput (fastpacked) | ~26 k tokens/s |
 
-Honest comparison with BitNet:
-
-- **Size/compression:** Ternair wins — 33x smaller than the FP16 equivalent (1.6 bits/value vs 2 bits typical of BitNet).
-- **Portability:** Ternair wins — zero mandatory HuggingFace dependency, bundled server, multiple backends with fallback.
-- **Raw speed on commodity GPUs:** neither ternary implementation beats cuBLAS FP16 on standard hardware; the ternary advantage only materialises on bit-level CPU SIMD or specialised hardware.
-- **Quality:** BitNet wins today — it is trained on trillions of tokens; Ternair ships untrained profiles and a working training path.
+See the [Ternair vs BitNet — the full comparison](#ternair-vs-bitnet--the-full-comparison) section for the complete, honest breakdown.
 
 ## CLI reference
 
