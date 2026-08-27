@@ -18,9 +18,13 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
+        # Compute in fp32 for numerical stability but return in the input
+        # dtype (fp16 / bf16 for inference) -- ``x`` is reassigned below,
+        # so capture the input dtype *before* the fp32 upcast.
+        dtype = x.dtype
         var = x.float().pow(2).mean(dim=-1, keepdim=True)
         x = x.float() * torch.rsqrt(var + self.eps)
-        return (x * self.weight).to(x.dtype)
+        return (x * self.weight).to(dtype)
 
 
 __all__ = ["RMSNorm"]

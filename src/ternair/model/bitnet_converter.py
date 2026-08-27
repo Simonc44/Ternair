@@ -38,8 +38,9 @@ import json
 import logging
 import os
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import torch
 
@@ -232,6 +233,86 @@ def _set_param(model: TernairForCausalLM, dotted: str, value: torch.Tensor) -> b
         return False
 
 
+@contextmanager
+def _default_dtype(dtype: torch.dtype) -> Iterator[None]:
+    """Build tensors in ``dtype`` without a transient float32 copy.
+
+    ``model.to(dtype)`` would first allocate the model in float32 and then
+    cast it, doubling peak RAM for multi-billion-parameter checkpoints.
+    Constructing directly in the target dtype keeps peak memory low.
+    """
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old)
+
+
+def _scan_sub_norm_keys(checkpoint_files: list[str]) -> tuple[bool, bool]:
+    """Detect BitNet sub-layer norms from checkpoint keys (mmap, no data load)."""
+    from safetensors import safe_open  # type: ignore
+
+    has_attn = False
+    has_ffn = False
+    for path in checkpoint_files:
+        if path.endswith(".bin"):
+            tensors = torch.load(path, map_location="cpu", weights_only=True)
+            try:
+                for k in tensors:
+                    if k.endswith("self_attn.attn_sub_norm.weight"):
+                        has_attn = True
+                    if k.endswith("mlp.ffn_sub_norm.weight"):
+                        has_ffn = True
+            finally:
+                del tensors
+        else:
+            with safe_open(path, framework="pt", device="cpu") as f:
+                for k in f.keys():
+                    if k.endswith("self_attn.attn_sub_norm.weight"):
+                        has_attn = True
+                    if k.endswith("mlp.ffn_sub_norm.weight"):
+                        has_ffn = True
+        if has_attn and has_ffn:
+            break
+    return has_attn, has_ffn
+
+
+def _copy_one_tensor(
+    model: TernairForCausalLM,
+    hf_key: str,
+    tensor: torch.Tensor,
+    report: ConvertReport,
+) -> int:
+    """Copy one master tensor into the model; 1 on success, 0 if ignored."""
+    tern_key = _ternair_state_dict_path(hf_key)
+    if tern_key is None:
+        report.n_ignored_tensors += 1
+        if len(report.ignored_keys) < 10:
+            report.ignored_keys.append(hf_key)
+        return 0
+    if _set_param(model, tern_key, tensor):
+        return 1
+    report.n_ignored_tensors += 1
+    if len(report.ignored_keys) < 10:
+        report.ignored_keys.append(hf_key)
+    return 0
+
+
+def _drop_master_weights(model: TernairForCausalLM) -> None:
+    """Release the fp master weights after :meth:`freeze_storage`.
+
+    The eval forward only reads the packed buffers, so the master weights
+    can be dropped to free RAM (anticipated in ``TernairLinear``: "FP
+    weight - kept for training; discarded after freeze_storage if desired").
+    """
+    from ternair.quantization.linear import TernairLinear
+
+    for module in model.modules():
+        if isinstance(module, TernairLinear):
+            module.weight = None  # type: ignore[assignment]
+
+
 def _find_checkpoint_files(source_dir: str) -> list[str]:
     """Locate all checkpoint shards in ``source_dir``.
 
@@ -305,45 +386,49 @@ def convert_bitnet_checkpoint(
         hf_config = json.load(f)
 
     ternair_config = bitnet_config_to_ternair(hf_config, storage=storage)
-    model = TernairForCausalLM(ternair_config)
 
     checkpoint_files = _find_checkpoint_files(source_dir)
+
+    # Detect BitNet b1.58 sub-layer norms from the checkpoint keys (mmap
+    # scan -- cheap) and enable them in the config before building the
+    # model, so the architecture matches the official 2B-4T from the start.
+    has_attn_sub_norm, has_ffn_sub_norm = _scan_sub_norm_keys(checkpoint_files)
+    if (has_attn_sub_norm or has_ffn_sub_norm) and not ternair_config.use_sub_norm:
+        _LOGGER.info(
+            "Checkpoint has sub-layer norms (attn=%s ffn=%s); enabling use_sub_norm",
+            has_attn_sub_norm, has_ffn_sub_norm,
+        )
+        ternair_config.use_sub_norm = True
+
+    # Build the model directly in bf16 (the master checkpoint dtype).  A
+    # float32 build would need ~8 GB just for the parameters of a 2B model
+    # and OOM the CI runner; bf16 halves that.
+    with _default_dtype(torch.bfloat16):
+        model = TernairForCausalLM(ternair_config)
+
+    # Stream master weights one tensor at a time (safetensors mmap): copy
+    # into the model and discard immediately.  Never materialise the full
+    # checkpoint dict in RAM -- that is ~4.3 GB for the 2B-4T by itself.
     _LOGGER.info("Loading master weights from %d shard(s) ...", len(checkpoint_files))
-    tensors: dict[str, torch.Tensor] = {}
+    n_loaded = 0
     for path in checkpoint_files:
         if path.endswith(".bin"):
-            tensors.update(torch.load(path, map_location="cpu", weights_only=True))
+            tensors = torch.load(path, map_location="cpu", weights_only=True)
+            try:
+                for hf_key, tensor in tensors.items():
+                    n_loaded += _copy_one_tensor(model, hf_key, tensor, report)
+            finally:
+                del tensors
         else:
-            tensors.update(_load_safetensors_dict(path))
+            from safetensors import safe_open  # type: ignore
 
-    # Detect BitNet b1.58 sub-layer norms from the checkpoint keys and
-    # enable them in the config if present (official 2B-4T architecture).
-    has_attn_sub_norm = any(k.endswith("self_attn.attn_sub_norm.weight") for k in tensors)
-    has_ffn_sub_norm = any(k.endswith("mlp.ffn_sub_norm.weight") for k in tensors)
-    if has_attn_sub_norm or has_ffn_sub_norm:
-        if not ternair_config.use_sub_norm:
-            _LOGGER.info(
-                "Checkpoint has sub-layer norms (attn=%s ffn=%s); enabling use_sub_norm",
-                has_attn_sub_norm, has_ffn_sub_norm,
-            )
-            ternair_config.use_sub_norm = True
-            model = TernairForCausalLM(ternair_config)
-
-    # Copy master weights into the Ternair model (embedding, norms, linears).
-    n_loaded = 0
-    for hf_key, tensor in tensors.items():
-        tern_key = _ternair_state_dict_path(hf_key)
-        if tern_key is None:
-            report.n_ignored_tensors += 1
-            if len(report.ignored_keys) < 10:
-                report.ignored_keys.append(hf_key)
-            continue
-        if _set_param(model, tern_key, tensor):
-            n_loaded += 1
-        else:
-            report.n_ignored_tensors += 1
-            if len(report.ignored_keys) < 10:
-                report.ignored_keys.append(hf_key)
+            with safe_open(path, framework="pt", device="cpu") as f:
+                for hf_key in f.keys():
+                    tensor = f.get_tensor(hf_key)
+                    try:
+                        n_loaded += _copy_one_tensor(model, hf_key, tensor, report)
+                    finally:
+                        del tensor
     report.n_loaded_tensors = n_loaded
 
     # Ternarise + pack every linear layer (gamma = mean(|W|) per row).
@@ -351,6 +436,11 @@ def convert_bitnet_checkpoint(
     report.n_layers = len(snapshot)
     report.n_ternary_params = model.count_parameters(include_embedding=True)
     report.n_master_params = sum(p.numel() for p in model.parameters())
+
+    # The eval path only reads the packed buffers after freeze_storage, so
+    # drop the master fp weights now -- frees ~half of the model's RAM for
+    # the export step.
+    _drop_master_weights(model)
 
     model.eval()
     os.makedirs(output_dir, exist_ok=True)
@@ -432,7 +522,11 @@ def load_converted_model(
         raw = json.load(f)
 
     cfg = bitnet_config_to_ternair(raw, storage=raw.get("storage", "packed"))
-    model = TernairForCausalLM(cfg)
+    # Build directly in the target dtype (fp16 by default): a float32
+    # build would need ~8 GB of RAM for a 2B model even though the packed
+    # weights it will hold are only a few hundred MB.
+    with _default_dtype(dtype):
+        model = TernairForCausalLM(cfg)
 
     safetensors_path = os.path.join(model_dir, "model.safetensors")
     if not os.path.exists(safetensors_path):

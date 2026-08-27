@@ -31,7 +31,10 @@ on:
 
 jobs:
   convert-and-verify:
-    runs-on: ubuntu-latest
+    # 14 GB RAM: converting the 2B-4T (bf16 model + packed output) peaks
+    # around 7 GB, and the parity step holds the HF reference AND the
+    # converted model at once.  ubuntu-latest only has 7 GB -- it OOMs.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 

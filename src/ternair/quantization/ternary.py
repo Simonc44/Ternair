@@ -195,9 +195,15 @@ def ternarize(w: Tensor, dim: int = -1) -> tuple[Tensor, Tensor]:
 
     Returns ``(trits, gamma)`` with trits in ``{-1, 0, +1}`` (int8)
     and gamma in float32.
+
+    Gamma (the per-row scale) is computed in float32 even when the weights
+    live in bf16/fp16: a bf16 ``mean(|W|)`` carries ~2-4 % relative error,
+    which shifts the packed scales and the logits.  Upcasting first keeps
+    the packed weights identical to a float32 build.
     """
-    gamma = _compute_gamma(w, dim=dim)
-    w_norm = w / gamma
+    w_f = w.float()
+    gamma = _compute_gamma(w_f, dim=dim)
+    w_norm = w_f / gamma
     w_clip = torch.clamp(w_norm, -1.0, 1.0)
     w_ternary = torch.round(w_clip)
     return w_ternary.to(torch.int8), gamma.to(torch.float32)

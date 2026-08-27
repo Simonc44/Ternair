@@ -38,8 +38,18 @@ def _load_ref_logits(model_dir: str, ids: torch.Tensor) -> torch.Tensor:
     from transformers import AutoModelForCausalLM, AutoConfig
 
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_config(config)
-    # Load the master weights from the checkpoint directory.
+    # Build the reference directly in bf16 (the master checkpoint dtype):
+    # a float32 build would need ~8 GB of RAM for the 2B model and can OOM
+    # the CI runner.
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    try:
+        model = AutoModelForCausalLM.from_config(config)
+    finally:
+        torch.set_default_dtype(old)
+
+    # Load the master weights from the checkpoint directory, copying each
+    # tensor straight into the model parameters (no second state-dict copy).
     state = model.state_dict()
     from safetensors import safe_open
 
@@ -48,12 +58,12 @@ def _load_ref_logits(model_dir: str, ids: torch.Tensor) -> torch.Tensor:
     )
     if not shards:
         shards = [Path(model_dir) / "model.safetensors"]
-    for shard in shards:
-        with safe_open(str(shard), framework="pt", device="cpu") as f:
-            for k in f.keys():
-                if k in state and state[k].shape == f.get_slice(k).get_shape():
-                    state[k] = f.get_tensor(k)
-    model.load_state_dict(state, strict=False)
+    with torch.no_grad():
+        for shard in shards:
+            with safe_open(str(shard), framework="pt", device="cpu") as f:
+                for k in f.keys():
+                    if k in state and state[k].shape == f.get_slice(k).get_shape():
+                        state[k].copy_(f.get_tensor(k))
     model.eval()
     with torch.no_grad():
         out = model(ids)

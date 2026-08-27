@@ -114,6 +114,19 @@ def _dtype_bytes(dtype: torch.dtype) -> int:
 # Collect tensors from a Ternair model
 # ---------------------------------------------------------------------------
 
+def _as_exportable(t: Tensor) -> Tensor:
+    """Make a tensor serialisable by the minimal SafeTensors writer.
+
+    bf16 cannot be converted to NumPy bytes portably in this writer, so
+    cast it to fp16 (same 2-byte size; no precision loss for values that
+    already live in bf16).  This happens when a model is built in bf16,
+    e.g. by the BitNet converter, to keep peak RAM low.
+    """
+    if t.dtype == torch.bfloat16:
+        return t.data.to(torch.float16)
+    return t.data
+
+
 def _collect_ternary_tensors(model: TernairForCausalLM) -> dict[str, Tensor]:
     """Collect all tensors from a frozen Ternair model.
 
@@ -126,7 +139,9 @@ def _collect_ternary_tensors(model: TernairForCausalLM) -> dict[str, Tensor]:
     prefix = "model."
 
     # Embedding
-    tensors[f"{prefix}embed_tokens.weight"] = model.model.embed_tokens.weight.data
+    tensors[f"{prefix}embed_tokens.weight"] = _as_exportable(
+        model.model.embed_tokens.weight
+    )
 
     # Per-layer norms + TernairLinear weights/gamma
     for name, module in model.named_modules():
@@ -159,7 +174,7 @@ def _collect_ternary_tensors(model: TernairForCausalLM) -> dict[str, Tensor]:
             hasattr(module, "weight") and "RMSNorm" in type(module).__name__
         ):
             hf_name = name.replace("model.", prefix)
-            tensors[f"{hf_name}.weight"] = module.weight.data
+            tensors[f"{hf_name}.weight"] = _as_exportable(module.weight)
 
     # LM head
     if model.lm_head is not None:
@@ -167,7 +182,7 @@ def _collect_ternary_tensors(model: TernairForCausalLM) -> dict[str, Tensor]:
             tensors["lm_head.packed_weight"] = model.lm_head.packed_weight
             tensors["lm_head.gamma"] = model.lm_head.gamma_eval
         else:
-            tensors["lm_head.weight"] = model.lm_head.weight.data
+            tensors["lm_head.weight"] = _as_exportable(model.lm_head.weight)
 
     return tensors
 
