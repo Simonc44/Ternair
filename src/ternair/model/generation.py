@@ -145,10 +145,16 @@ def generate(
     -------
     (1, T + generated) tokens including the prompt.
     """
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be >= 0")
+    if temperature < 0:
+        raise ValueError("temperature must be >= 0")
+    if repetition_penalty <= 0:
+        raise ValueError("repetition_penalty must be > 0")
     out = input_ids.clone()
-    eos = eos_token_id or pad_token_id
+    eos = eos_token_id if eos_token_id is not None else pad_token_id
 
-    for _ in range(max_new_tokens):
+    for step in range(max_new_tokens):
         logits = model(out)
         logits = logits[:, -1, :]  # (1, vocab_size)
 
@@ -197,8 +203,14 @@ def generate_stream(
     Tensor
         Scalar tensor with the latest generated token ID.
     """
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be >= 0")
+    if temperature < 0:
+        raise ValueError("temperature must be >= 0")
+    if repetition_penalty <= 0:
+        raise ValueError("repetition_penalty must be > 0")
     out = input_ids.clone()
-    eos = eos_token_id or pad_token_id
+    eos = eos_token_id if eos_token_id is not None else pad_token_id
     generated: list[int] = []
 
     for _ in range(max_new_tokens):

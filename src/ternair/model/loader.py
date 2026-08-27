@@ -578,7 +578,13 @@ def load_ternair_model(
     report = LoadReport()
     safetensors_path = os.path.join(model_dir, safetensors_name)
     if not os.path.exists(safetensors_path):
-        raise FileNotFoundError(f"Missing ternary safetensors at {safetensors_path}")
+        fallback_path = os.path.join(model_dir, "model.safetensors")
+        if safetensors_name == "model_ternair_2bit.safetensors" and os.path.exists(fallback_path):
+            safetensors_path = fallback_path
+        else:
+            raise FileNotFoundError(
+                f"Missing ternary safetensors at {safetensors_path}"
+            )
 
     # 1) Tokenizer + config
     tokenizer = _load_tokenizer(model_dir)
@@ -703,6 +709,8 @@ def _replace_native(
         prefix = key[: -len(".packed_weight")]
         gamma_key = prefix + ".gamma_eval"
         shape_key = prefix + ".shape"
+        if gamma_key not in tensors:
+            gamma_key = prefix + ".gamma"
         if gamma_key not in tensors:
             continue
         # shape is optional -- use the gamma shape when missing.

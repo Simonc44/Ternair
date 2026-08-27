@@ -45,6 +45,12 @@ class TernairModel(nn.Module):
         self.register_buffer("_rope_sin", torch.empty(0), persistent=False)
         self._cached_seq_len = -1
 
+    def reset_kv_cache(self) -> None:
+        """Clear attention caches for a new generation request."""
+        for layer in self.layers:
+            if layer.is_attn:
+                layer.block.reset_kv_cache()
+
     def _ensure_rope_cache(self, seq_len: int, device, dtype) -> tuple[Tensor, Tensor]:
         if seq_len <= self._cached_seq_len and self._rope_cos.numel() >= seq_len * self.config.head_dim:
             return (

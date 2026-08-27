@@ -27,6 +27,12 @@ Entry points
 """
 
 from ternair._version import __version__
+from ternair.errors import (
+    ArtifactError,
+    BackendUnavailableError,
+    ConfigurationError,
+    TernairError,
+)
 from ternair.quantization import (
     Activation8Bit,
     TernairLinear,
@@ -83,6 +89,10 @@ from ternair.training import cross_entropy, tokenise_corpus, train_one_step
 
 __all__ = [
     "__version__",
+    "TernairError",
+    "ArtifactError",
+    "ConfigurationError",
+    "BackendUnavailableError",
     # quantization
     "Activation8Bit",
     "TernairLinear",

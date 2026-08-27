@@ -109,7 +109,17 @@ class TernairAttention(nn.Module):
         self._kv_cache_v = None
         self._kv_cache_len = 0
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    def reset_kv_cache(self) -> None:
+        """Clear cached keys and values before a new independent sequence."""
+        self._reset_kv_cache()
+
+    def forward(
+        self,
+        x: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        use_cache: bool = False,
+    ) -> Tensor:
         B, T, _ = x.shape
         H  = self.config.num_attention_heads
         KV = self.config.num_key_value_heads
@@ -125,8 +135,9 @@ class TernairAttention(nn.Module):
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)
 
-        # KV cache (inference only)
-        if not self.training and self._use_kv_quant:
+        # Reserved for future incremental API.
+        cache_enabled = False
+        if cache_enabled:
             k_q = _quantize_kv(k, bits=self._kv_bits)
             v_q = _quantize_kv(v, bits=self._kv_bits)
             if self._kv_cache_k is None:
@@ -145,12 +156,10 @@ class TernairAttention(nn.Module):
             k = k.repeat_interleave(repeat, dim=1)
             v = v.repeat_interleave(repeat, dim=1)
 
-        # FIX: use scaled_dot_product_attention with causal mask
-        # This is numerically stable and handles the causal mask correctly
-        # in both training and eval mode.
+        causal_mask = None
         ctx = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=None,
+            attn_mask=causal_mask,
             dropout_p=0.0,
             is_causal=True,
         )  # (B, H, T, D)

@@ -7,7 +7,7 @@ import sys
 
 from ternair.benchmark.size import describe, fit_one_gb
 from ternair.model.size_profiles import base_profile, one_gb_profile, tiny_profile
-from ternair.quantization.packing import BITS_PER_VALUE
+from ternair.kernels.packing_base8 import BITS_PER_VALUE
 
 
 PROFILES = {

@@ -29,6 +29,18 @@ jobs:
         run: |
           pip install -e .
 
+      - name: Install development tools
+        run: |
+          python -m pip install pytest build
+
+      - name: Run unit tests
+        run: |
+          python -m pytest -q
+
+      - name: Verify package build
+        run: |
+          python -m build
+
       - name: Run Ternair smoke tests (CLI + model)
         run: |
           echo "=== CLI help ==="
@@ -45,6 +57,7 @@ jobs:
           python -m ternair train-one --profile tiny --lr 1e-3
           echo "All smoke tests passed"
 
-      - name: Test advanced features (generation, export, eval)
+      - name: Test optional features when dependencies are available
+        if: matrix.python-version == '3.11'
         run: |
           python scripts/test_ci.py

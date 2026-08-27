@@ -20,18 +20,14 @@ from ternair.benchmark.size import model_size_bytes
 from ternair.model.config import TernairConfig
 
 
-def tiny_profile(storage: str = "packed") -> TernairConfig:
+def tiny_profile(storage: str = "packed", **overrides) -> TernairConfig:
     """~2.6 M-parameter toy model (~2.5 MiB packed).  CPU-runnable."""
-    return TernairConfig(
-        vocab_size=4096,
-        hidden_size=256,
-        intermediate_size=512,
-        num_hidden_layers=8,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        max_position_embeddings=512,
-        storage=storage,
-    )
+    values = dict(vocab_size=4096, hidden_size=256, intermediate_size=512,
+                  num_hidden_layers=8, num_attention_heads=4,
+                  num_key_value_heads=4, max_position_embeddings=512,
+                  storage=storage)
+    values.update(overrides)
+    return TernairConfig(**values)
 
 
 def small_profile(storage: str = "packed") -> TernairConfig:

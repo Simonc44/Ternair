@@ -52,16 +52,12 @@ class TernairHybridBlock(nn.Module):
         super().__init__()
         self.layer_idx = layer_idx
         
-        # Mode de dispatch : soit periodique, soit legacy (num_attn_layers)
+        attn_layers = getattr(config, "num_attn_layers", config.num_hidden_layers)
         period = getattr(config, "attn_layer_period", 0)
-        
-        if period > 1 and config.num_attn_layers < config.num_hidden_layers:
-            # Pattern periodique : SSM x (period-1) puis Attention
-            # La couche est attention si (layer_idx+1) % period == 0
+
+        if period > 1 and attn_layers == config.num_hidden_layers:
             self.is_attn = ((layer_idx + 1) % period == 0)
         else:
-            # Legacy : les premieres num_attn_layers couches sont attention
-            attn_layers = getattr(config, "num_attn_layers", config.num_hidden_layers)
             self.is_attn = layer_idx < attn_layers
 
         if self.is_attn:

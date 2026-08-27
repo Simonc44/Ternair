@@ -169,7 +169,7 @@ def describe(config: TernairConfig, **kwargs) -> str:
         f"  ternary params       : {b.ternary_param_count:,}  "
         f"({b.ternary_param_count / 1e9:.3f} B)\n"
         f"  ternary weights      : {b.ternary_linear_weights_bytes / 1024 ** 2:8.1f} MiB\n"
-        f"  ternary γ scales     : {b.ternary_linear_scales_bytes / 1024.0:12.1f} KiB\n"
+        f"  ternary scales       : {b.ternary_linear_scales_bytes / 1024.0:12.1f} KiB\n"
         f"  embedding (cfg bytes): {b.embedding_bytes / 1024 ** 2:8.1f} MiB\n"
         f"  lm head              : {b.lm_head_bytes / 1024.0:12.1f} KiB\n"
         f"  RMSNorm + buffer     : {b.other_bytes:8d} B\n"

@@ -8,7 +8,7 @@ version = "0.6.0"
 description = "Stand-alone BitNet b1.58-style ternary language model prototype"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 authors = [{ name = "ternair contributors" }]
 keywords = [
     "ternary",
@@ -31,6 +31,16 @@ dependencies = [
     "torch>=2.4",
     "numpy>=1.17",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "build>=1"]
+huggingface = ["transformers>=4.40", "safetensors>=0.4"]
+triton = ["triton>=2.2; platform_system != 'Windows'"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/test_kernels.py", "tests/test_quantization.py", "tests/test_size.py", "tests/test_model.py", "tests/test_ssm.py", "tests/test_production_roundtrip.py"]
+addopts = "-ra"
+
 
 [project.scripts]
 ternair = "ternair.cli:main"

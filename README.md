@@ -1,603 +1,163 @@
-![Ternair Project Banner](https://github.com/Simonc44/Ternair/blob/main/assets/logo-ternair.png?raw=true)
+# Ternair
 
-[![CI](https://github.com/Simonc44/Ternair/actions/workflows/ci.yml/badge.svg)](https://github.com/Simonc44/Ternair/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/pytorch-2.4%2B-orange)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/Simonc44/Ternair?include_prereleases)](https://github.com/Simonc44/Ternair/releases)
+Ternair is a Python/PyTorch implementation of ternary language-model components inspired by BitNet b1.58. It provides ternary weight quantization, packed storage, a decoder-only model, portable inference fallbacks, SafeTensors export, and optional acceleration backends.
 
-**BitNet b1.58 -- Reseaux de neurones ternaires a l'echelle 1 Go**
+> **Status:** beta research software. The PyTorch reference path and the tested CPU/NumPy paths are the supported baseline. Triton and the native C++ engine are optional accelerators and must be benchmarked on the target machine.
 
----
+## What is supported
 
-Ternair est une implementation de production de **BitNet b1.58**, une architecture de reseau de neurones dans laquelle chaque poids est contraint a `{-1, 0, +1}` (valeurs ternaires, ~1,58 bits). Cette approche permet :
+- Ternary weights in `{-1, 0, +1}` with straight-through training.
+- `packed` base-3 storage (5 trits/byte) and `fastpacked` 2-bit storage.
+- Decoder-only causal LM with GQA/RoPE attention, SwiGLU MLP, and optional hybrid SSM blocks.
+- Greedy and sampled generation, streaming generation, repetition penalty, and chat templates.
+- Portable PyTorch and NumPy inference paths.
+- Optional Triton GPU and native C++ CPU backends.
+- Atomic SafeTensors export and model-size/compression reports.
+- CLI commands for inspection, size estimation, demos, training smoke tests, and inference.
 
-- Compression memoire ~16x par rapport au FP16 (942 Mio pour un modele de 4 milliards de parametres)
-- Arithmetique par additions et soustractions uniquement -- zero multiplication flottante durant l'inference
-- Absence de cache KV lors de l'utilisation des couches SSM optionnelles (memoire de generation en O(1))
-- Compression de tokens K-WTA via le goulot thalamique (ThalamicBottleneck) : 32 latents fixes par sequence
+## Requirements
 
-## Fonctionnalites (v0.6.0)
+- Python 3.10-3.12
+- PyTorch 2.4 or newer
+- NumPy 1.17 or newer
+- Optional: `pytest` for development, Triton for CUDA kernels, `safetensors` and `transformers` for external model loading.
 
-| Fonctionnalite | Statut |
-|----------------|--------|
-| Quantification ternaire (STE, echelle gamma, 3 valeurs) | Disponible |
-| Conditionnement : base-8 (1,6 b/v, `MODE_BASE8`) ou 2 bits (2,0 b/v) | Disponible |
-| **Codec canonique `packing_base8` (5 trits/octet)** | **Nouveau v0.6.0** |
-| **Kernel Triton unifie (single + batched, decodage bit-arithmetic)** | **Refactor v0.6.0** |
-| Noyau GPU (Triton -- decodage en boucle JIT) | Disponible |
-| Noyau CPU (C++ SIMD -- AVX-512 / ARM NEON) | Disponible |
-| Modele causal LM (attention GQA, RoPE, MLP SwiGLU ternaire) | Disponible |
-| ThalamicBottleneck (compression K-WTA, K=32) | Disponible |
-| Bloc SSM (recurrence style Mamba, memoire O(1)) | Disponible |
-| Bloc hybride SSM/Attention 3:1 | Disponible |
-| Rotation Hadamard (QuaRot) pour lissage d'activations | Disponible |
-| Recuit de quantification (Quantization Annealing) | Disponible |
-| Facteurs d'echelle alpha appris (QAT) | Disponible |
-| Distillation KL + Feature Matching Loss | Disponible |
-| Planificateur WSD (Warmup-Stable-Decay) | Disponible |
-| Optimiseur decouple (WD=0 pour ternaire, WD=0,1 pour embedding) | Disponible |
-| Pipeline d'entrainement Accelere | Disponible |
-| Export SafeTensors compatible HuggingFace | Disponible (v0.2.0) |
-| Rapport de compression automatique | Disponible (v0.2.0) |
-| Generation avec repetition penalty + streaming | Disponible (v0.2.0) |
-| Templates de chat (ChatML, Llama-3) | Disponible (v0.2.0) |
-| Suite d'evaluation (perplexite, zero-shot, vitesse) | Disponible (v0.2.0) |
-| Runtime C++ autonome (inference.h, zero dependance) | Disponible (v0.2.0) |
-| **T-LoRA / BitDelta (adaptateurs ternaires low-rank)** | **Nouveau v0.3.0** |
-| **OmniQuant (echelle S apprise activation-poids)** | **Nouveau v0.3.0** |
-| **BitAttention (KV-Cache quantifie 2-bit)** | **Nouveau v0.3.0** |
-| **Ternary MoE (Melange d'Experts ternaires)** | **Nouveau v0.3.0** |
-| **WebGPU / WebAssembly backend navigateur** | **Nouveau v0.3.0** |
-| Projection de taille 1 Gio (942 Mio, 4,07 milliards de parametres) | Disponible |
-| **Pipeline modulaire (`TernairPipeline`)** | **Nouveau v0.5.0** |
-| **Sauvegarde atomique de checkpoint (anti-corruption)** | **Nouveau v0.5.0** |
-| **Estimateur memoire pre-flight (`estimate_memory`)** | **Nouveau v0.5.0** |
-| **Profils intermediaires (`small`, `medium`, `large`)** | **Nouveau v0.5.0** |
-| **Validation renforcee de `TernairConfig`** | **Nouveau v0.5.0** |
-| **Codec base-8 canonique + alias `MODE_PACKED` = `MODE_BASE8`** | **Nouveau v0.6.0** |
-| **Kernel `triton_fast` unifie (1-D + 2-D, grid `(M, B)`)** | **Nouveau v0.6.0** |
-| **Shims retrocompatibles (`quantization/packing.py`, `kernels/triton_matmul.py`)** | **Nouveau v0.6.0** |
-
-## Demarrage rapide
+Install from a checkout:
 
 ```bash
-# Creer l'environnement
-python3 -m venv .venv
-source .venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv/Scripts/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
 
-# Installer ternair depuis GitHub
-pip install git+https://github.com/Simonc44/Ternair.git
+Development tools:
 
-# Afficher la configuration par defaut
-python -m ternair info
+```bash
+python -m pip install pytest build
+```
 
-# Projection de taille pour la cible 1 Gio
-python -m ternair size --profile one_gb
+## Quick start
 
-# Executer un petit modele de demonstration
-python -m ternair demo --profile tiny
+```bash
+python -m ternair --help
+python -m ternair info --profile tiny
+python -m ternair size --profile tiny
+python -m ternair demo --profile tiny --max-new-tokens 8
+```
 
-# Exporter un modele glace en format SafeTensors
-python -c "
-from ternair.model.size_profiles import tiny_profile
-from ternair.model.modeling import TernairForCausalLM
-from ternair.model.export import export_to_safetensors, print_compression_report
+Python API:
 
-model = TernairForCausalLM(tiny_profile(storage='fastpacked'))
+```python
+import torch
+from ternair import TernairForCausalLM, tiny_profile, generate
+
+config = tiny_profile(storage="fastpacked")
+model = TernairForCausalLM(config)
 model.freeze_storage()
 model.eval()
-print_compression_report(model)
-export_to_safetensors(model, 'mon_modele.safetensors')
-"
 
-# Ajouter des adaptateurs T-LoRA pour specialisation
-python -c "
-from ternair.model.size_profiles import tiny_profile
-from ternair.model.modeling import TernairForCausalLM
-from ternair.quantization.bitdelta import add_lora_to_model
-
-model = TernairForCausalLM(tiny_profile(storage='fastpacked'))
-registry = add_lora_to_model(model, rank=8)
-print(f'Adaptateurs : {registry.count_params():,} parametres entrainables')
-"
-
-# Evaluer la perplexite du modele
-python -c "
-from ternair.model.size_profiles import tiny_profile
-from ternair.model.modeling import TernairForCausalLM
-from ternair.benchmark.eval import compute_perplexity
-from ternair.training.data import CharTokenizer, toy_corpus
-
-model = TernairForCausalLM(tiny_profile(storage='fastpacked'))
-tok = CharTokenizer(toy_corpus())
-ppl = compute_perplexity(model, tok, dataset_name='wikitext',
-                         subset='wikitext-2-raw-v1', split='test',
-                         max_tokens=1000)
-print(f'Perplexite: {ppl.perplexity:.2f}')
-"
+prompt = torch.randint(0, config.vocab_size, (1, 8))
+with torch.no_grad():
+    output = generate(model, prompt, max_new_tokens=16, temperature=0.0)
+print(output.shape)
 ```
 
-## Generation avancee
+## Inference backends
+
+Use `TernairDirectInferencer` when backend selection should be explicit:
 
 ```python
-from ternair.model.generation import generate, generate_stream, format_chat_prompt
-import torch
+from ternair import TernairDirectInferencer
 
-# Generation avec repetition penalty
-output = generate(model, prompt, max_new_tokens=64,
-                  temperature=0.8, top_k=40, top_p=0.9,
-                  repetition_penalty=1.1)
-
-# Streaming token par token
-for token_tensor in generate_stream(model, prompt, max_new_tokens=32):
-    print(tokenizer.decode([token_tensor.item()]), end='', flush=True)
-
-# Template de chat ChatML
-prompt = format_chat_prompt([
-    {"role": "user", "content": "Raconte une histoire"}
-], format="chatml")
+inferencer = TernairDirectInferencer(model, backend="auto", device="cpu")
+inferencer.prepare()
+print(inferencer.describe())
+logits = inferencer.forward(prompt)
 ```
 
-## T-LoRA / BitDelta -- Specialisation sans retoucher le modele de base
+`auto` prefers Triton on CUDA, the native C++ backend on CPU when available, and otherwise the PyTorch reference path. A requested backend may fall back when its storage or hardware constraints are not met. Always measure latency and numerical parity on deployment hardware.
 
-Ajoutez des adaptateurs ternaires low-rank pour specialiser votre modele sur une tache (code, medecine, langue) sans modifier les poids de base.
-
-```python
-from ternair.quantization.bitdelta import (
-    add_lora_to_model, add_bitdelta_to_model,
-    TernaryLoRALinear, AdapterRegistry
-)
-
-# LoRA ternaire (rank=8, ~95% de reduction)
-registry = add_lora_to_model(model, rank=8, alpha=1.0)
-
-# Entrainer seulement les adaptateurs
-optimizer = torch.optim.AdamW(registry.adapter_params(), lr=1e-3)
-for step in range(100):
-    logits = model(input_ids)
-    loss = torch.nn.functional.cross_entropy(
-        logits.view(-1, logits.size(-1)), targets.view(-1)
-    )
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-
-# Sauvegarder les adaptateurs (quelques Ko)
-torch.save(registry.state_dict(), "adaptateurs_code.pt")
-
-# Recharger sur un autre modele de base
-registry2 = add_lora_to_model(model2, rank=8)
-registry2.load_state_dict(torch.load("adaptateurs_code.pt"))
-```
-
-## OmniQuant -- Calibration des echelles activation-poids
-
-Optimise une echelle diagonale S pour minimiser l'erreur de quantification entre la sortie FP16 et la sortie ternaire + 8-bit activations. Reduit la perte de perplexite de 15 a 20%.
-
-```python
-from ternair.quantization.activation import ScaleEquivalence, calibrate_scale_equivalence
-
-# Calibration automatique sur quelques echantillons
-scales = calibrate_scale_equivalence(
-    model,
-    calibration_data=x_calib,
-    lr=1e-3,
-    steps=100,
-)
-
-# Application manuelle
-scale = ScaleEquivalence(hidden_size=256)
-x_s, w_s = scale(x, weight)  # (X * S^-1) x (S * W) = X x W
-```
-
-## BitAttention -- KV-Cache quantifie en 2-bit
-
-Reduit l'empreinte memoire du KV-Cache par 4 ou 8, rendant les contextes ultra-longs (32k+ tokens) praticables sur appareils a faible RAM.
-
-```python
-from ternair.model.config import TernairConfig
-
-# Activer la quantification KV avec kv_cache_bits=2
-config = TernairConfig(
-    hidden_size=256,
-    num_hidden_layers=4,
-    num_attention_heads=4,
-    num_key_value_heads=4,
-    kv_cache_bits=2,  # 2-bit KV cache (BitAttention)
-)
-```
-
-## Ternary MoE -- Melange d'Experts ternaires
-
-Seulement 2 experts sur 8 sont actifs par token. Un modele de 12 milliards de parametres ternaires ne consomme le calcul que d'un modele de 2 milliards par token.
-
-```python
-from ternair.model.moe import TernaryMoEBlock, add_moe_to_model
-
-# Remplacer certains MLP par des blocs MoE
-add_moe_to_model(
-    model,
-    num_experts=8,    # 8 experts au total
-    top_k=2,          # 2 actifs par token
-    moe_layer_period=2,  # Toutes les 2 couches
-)
-```
-
-## WebGPU / WebAssembly -- Inference dans le navigateur
-
-Le backend WebGPU genere des compute shaders WGSL pour executer Ternair directement dans Chrome, Firefox ou Edge sans backend serveur.
-
-```bash
-# Generer les shaders WebGPU
-python -c "
-from ternair.kernels.webternair import (
-    generate_wgsl_ternary_matmul,
-    generate_js_runtime,
-    validate_webgpu_kernels,
-)
-
-# Valider les shaders
-results = validate_webgpu_kernels()
-print(f'Shaders valides: {results}')
-
-# Generer le runtime JS
-js_code = generate_js_runtime()
-with open('ternair-web.js', 'w') as f:
-    f.write(js_code)
-print('Runtime JS genere: ternair-web.js')
-"
-```
-
-## Mode d'inference direct (TernairDirectInferencer)
-
-Le mode d'inference direct orchestre les kernels bas niveau (`triton_fast`, `cpu_matmul`, `packed_ops`) derriere une API unique. Selection automatique du meilleur backend selon le materiel detecte.
-
-```python
-from ternair.model.inference import TernairDirectInferencer
-
-inferer = TernairDirectInferencer(model, backend="auto")
-inferer.prepare()  # appelle freeze_storage() + route chaque TernairLinear
-
-# Inspection rapide
-print(inferer.describe())
-# {
-#   "requested_backend": "auto",
-#   "resolved_backend": "torch",      # ou "triton" / "cpu_cpp" / "numpy"
-#   "available": {"torch": True, "numpy": True, "triton": False, "cpu_cpp": False},
-#   "n_ternary_layers": 44,
-#   "device": "cpu",
-# }
-
-# Forward + generate (memes signatures que generation.generate/generate_stream)
-logits = inferer.forward(input_ids)
-out = inferer.generate(input_ids, max_new_tokens=64,
-                       temperature=0.8, top_k=40, top_p=0.9)
-
-# Streaming token par token
-for tok in inferer.generate_stream(input_ids, max_new_tokens=16):
-    print(tok.item(), end=" ", flush=True)
-
-# Restaurer le mode par defaut
-inferer.restore()
-```
-
-CLI dediee (le sous-commande force `storage=fastpacked` pour activer les kernels) :
-
-```bash
-python -m ternair infer --profile tiny --backend auto --prompt "hello" --max-new-tokens 16
-python -m ternair infer --profile tiny --backend numpy --prompt "world" --temperature 0.0
-python -m ternair infer --profile tiny --backend torch --prompt "demo"  # toujours disponible
-```
-
-| Backend | Materiel | Condition | Notes |
-|---------|----------|-----------|-------|
-| `triton` | GPU CUDA | `torch.cuda.is_available()` + `triton` install | Kernel 4 trits/octet, bit-arithmetic, grid 2-D `(M, B)` |
-| `cpu_cpp` | CPU x86 / ARM | `cppyy` + header compilable | AVX-512 / NEON intrinsics |
-| `numpy` | CPU | toujours disponible | Reference portable, fp16 accumulator |
-| `torch` | tout | toujours disponible | Dequantise puis `F.linear`, fallback par defaut |
-
-Auto-selection : `triton` > `cpu_cpp` > `numpy` > `torch`. Les kernels ne fonctionnent qu'avec `storage="fastpacked"` et `in_features % 4 == 0` ; sinon `auto` retombe sur `torch` (toujours correct, jamais de regression).
-
-## Charger un modele ternaire depuis SafeTensors (load_ternair_model)
-
-Le module `ternair.model.loader` permet d'instancier en une ligne un modele LLaMA / Mistral qui a ete exporte en "ternary SafeTensors" (schema externe `.weight.packed / .weight.alpha / .weight.shape`). Utile pour deployer un modele QAT-distille (Mistral 7B, LLaMA-3, etc.) sans manipulation manuelle.
-
-```python
-from ternair import load_ternair_model
-
-model, tokenizer = load_ternair_model(
-    r"C:\\Users\\admin\\Documents\\Mistral 7B\\mistral-7b-v0.3-ternair",
-    device="cuda",
-)
-prompt = "The future of artificial intelligence is"
-inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-out = model.generate(
-    **inputs, max_new_tokens=80, do_sample=True,
-    temperature=0.7, top_p=0.9, repetition_penalty=1.1,
-    pad_token_id=tokenizer.eos_token_id,
-)
-print(tokenizer.decode(out[0], skip_special_tokens=True))
-```
-
-Sous le capot :
-
-1. Charge `config.json` + `AutoTokenizer` depuis le dossier.
-2. Construit le modele HF sur meta device (zero RAM allouee).
-3. Lit `model_ternair_2bit.safetensors` (schema externe auto-detecte, fallback sur le schema natif `packing_base8`).
-4. Remplace chaque `nn.Linear` par un `TernaryLinearFast` (decompression 2-bit a la volee + echelle alpha).
-5. Materialise les tenseurs meta residuels, deplace vers le device, passe en `eval()`.
-
-API minimale :
-
-```python
-from ternair import TernaryLinearFast, LoadReport, llama_to_hf, unpack_2bit
-```
-
-Le schema externe supporte :
-
-* `model.layers.X.attention.wq/wk/wv/wo.weight.packed` (uint8, 4 trits/octet)
-* `model.layers.X.attention.wq/wk/wv/wo.weight.alpha` (float32 scalaire par couche)
-* `model.layers.X.attention.wq/wk/wv/wo.weight.shape` (int64 `[out, in]`)
-* `model.layers.X.feed_forward.w1/w2/w3.*` (memes conventions)
-* `tok_embeddings.*` (sera decode en FP16 Embedding), `norm`, `output`, `attention_norm`, `ffn_norm` (FP16)
-* `*.bias` optionnels (FP16 ou FP32)
-
-## Export HuggingFace
+## Export
 
 ```python
 from ternair.model.export import export_huggingface_package
 
-# Export complet (config.json + model.safetensors + README.md)
-export_huggingface_package(
-    model,
-    output_dir="./mon-modele-ternaire",
-    model_name="MonModele-Ternair"
-)
+model.eval()
+model.freeze_storage()
+export_huggingface_package(model, "./dist/ternair-model", model_name="MyTernairModel")
 ```
 
-## Benchmark
-
-```python
-from ternair.benchmark.eval import run_eval_suite, print_report
-
-report = run_eval_suite(model, tokenizer,
-    run_perplexity=True, run_speed=True)
-print_report(report)
-```
-
-## Runtime C++ autonome
-
-Le fichier `src/ternair/kernels/inference.h` est un moteur d'inference header-only en C++17, zero dependance :
-
-```cpp
-#include "ternair/inference.h"
-
-TernairRuntime runtime;
-runtime.load("mon_modele.safetensors");
-
-std::vector<int> tokens = {1, 234, 567, ...};
-auto result = runtime.generate(tokens, 64);
-```
-
-Utilisable depuis n'importe quel langage via l'API C (`ternair_create`, `ternair_load`, `ternair_generate`).
-
-## Entrainement
+Exports are SafeTensors-compatible and written atomically. The package contains `config.json`, `model.safetensors`, and an optional model card. Loading external LLaMA/Mistral-style bundles requires the optional `transformers` and `safetensors` dependencies:
 
 ```bash
-# Test de fumee (20 pas, modele tiny, 2 millions de parametres)
-accelerate launch scripts/train.py --config scripts/train_tiny.yaml
-
-# Entrainement complet a 1 Gio (60 couches, 2560 dimensions cachees, 4 milliards de parametres)
-accelerate launch scripts/train.py --config scripts/train_one_gb.yaml
-
-# Distillation QAT depuis un modele HuggingFace
-PYTHONPATH=src python scripts/qat_distill.py
+python -m pip install transformers safetensors
 ```
 
-## Architecture
+The loader returns `(model, tokenizer, report)` and validates the requested file, with `model.safetensors` accepted for native Ternair exports.
 
-```
-TernairConfig:
-  ├── hidden_size=2560, num_hidden_layers=60
-  ├── num_attention_heads=32, num_key_value_heads=8  (GQA)
-  ├── intermediate_size=5120, max_position_embeddings=2048
-  ├── storage: "packed" | "fastpacked" | "int8"
-  ├── kv_cache_bits: 0 | 2 | 4  (BitAttention)
-  ├── num_experts: 1 | 4 | 8 | 16  (Ternary MoE)
-  │
-  ├── ThalamicBottleneck (optionnel)
-  │   └── K-WTA: top-32 tokens -> cross-attention -> 32 latents
-  │
-  ├── TernairHybridBlock x num_hidden_layers
-  │   ├── Attention (GQA + RoPE + KV quant)  -- pattern periodique 3:1
-  │   └── TernarySSM (scan style Mamba)       -- memoire O(1)
-  │
-  ├── TernaryMoEBlock (optionnel, remplace certains MLP)
-  │   └── 8 experts ternaires, top-2 actifs
-  │
-  ├── AdapterRegistry (T-LoRA / BitDelta)
-  │   └── Adaptateurs low-rank ternaires
-  │
-  └── TernairForCausalLM
-      ├── TernairEmbedding (poids lies)
-      ├── TernairModel (blocs hybrides + MoE)
-      └── TernairLMHead (lie)
+## CLI reference
+
+```text
+ternair info       Show a model configuration
+ternair size       Estimate storage and compression
+ternair demo       Run a forward/generation smoke demo
+ternair train-one  Run one toy training step
+ternair infer      Run inference through the backend dispatcher
 ```
 
-## Fonctionnement
+Run `python -m ternair COMMAND --help` for all options.
 
-### Quantification ternaire
+## Testing and release checks
 
-Chaque matrice de poids `W` est quantifiee par ligne :
+From the repository root:
 
-```
-gamma = mean(|W|)                     # echelle par ligne
-W_norm = W / gamma
-W_t = round(clamp(W_norm, -1, 1))    # -> {-1, 0, +1}
-```
-
-**Propagation avant** : `y = (gamma * W_t) (x)` -> se reduit a des additions et soustractions d'activations.
-
-**Retropropagation** : Straight-Through Estimator (STE) -- le gradient traverse `round` comme une identite.
-
-### Recuit de quantification
-
-Pendant le QAT, la temperature beta augmente progressivement de 1.0 a 15.0 :
-```
-W_proxy = tanh(beta * W / alpha) * alpha
-```
-Transition douce (tanh) -> dure (round) sans rupture de gradient.
-
-### Factor d'echelle alpha appris
-
-Chaque canal apprend son facteur d'echelle :
-```
-W_quant = round(clamp(W / alpha, -1, 1)) * alpha
-```
-Erreur de quantification reduite de ~40% par rapport a gamma statique.
-
-### Conditionnement rapide (2 bits)
-
-Chaque trit `{-1, 0, +1}` est stocke sur 2 bits dans un octet `uint8` (4 trits/octet) :
-
-```python
-# Decodage : sans modulo, sans table de correspondance, sans branchement
-trit = (bits & 1) - ((bits >> 1) & 1)  # -> {-1, 0, +1}
+```bash
+python -m pytest -q tests/test_kernels.py tests/test_quantization.py tests/test_size.py
+python -m pytest -q tests/test_model.py tests/test_ssm.py
+python -m build
 ```
 
-### Conditionnement base-8 (1,6 bits/valeur, NOUVEAU v0.6.0)
+The GitHub Actions workflow runs the CLI smoke checks and the project's CI script on Python 3.10, 3.11, and 3.12. CUDA, Triton, and native C++ acceleration are not assumed by the baseline CI.
 
-Le codec canonique vit dans `ternair.kernels.packing_base8` et encode 5 trits par octet en base 3 (poids `3**0..3**4`). L'ancien module `ternair.quantization.packing` est conserve comme shim retrocompatible ; `MODE_PACKED` reste un alias valide de `MODE_BASE8`.
+## Performance and quality claims
 
-```python
-from ternair.kernels.packing_base8 import (
-    pack_trits_base8, unpack_trits_base8, bytes_for,
-)
+Ternair's storage estimates are theoretical representations of model weights and do not equal end-to-end RAM usage. Embeddings, activations, norms, temporary buffers, the Python runtime, and optional caches add overhead. Throughput and quality depend on architecture, tokenizer, hardware, sequence length, and training data. The repository's benchmark files are examples, not universal comparisons with BitNet.
 
-trits = ... # np.ndarray (N,) dtype int8
-packed = pack_trits_base8(trits)            # ceil(N/5) octets
-print(f"{packed.nbytes} bytes pour {trits.size} trits")
-```
+Before production deployment, record at minimum:
 
-### Kernel Triton unifie (NOUVEAU v0.6.0)
+- peak resident memory and model load time;
+- prefill and decode tokens/second at representative batch and context lengths;
+- numerical parity between the selected backend and the PyTorch reference;
+- perplexity and task quality using the exact tokenizer and evaluation split;
+- behavior for invalid configurations, missing files, CPU-only hosts, and interrupted exports.
 
-`ternair.kernels.triton_fast.ternary_matmul_triton` gere en une seule fonction les appels 1-D `(N,)` et 2-D `(B, N)` grace a une grille `(pid_m, pid_b)`. Le decodage des trits se fait par bit-arithmetic (aucune table de correspondance, aucun branchement).
+## Production guidance
 
-```python
-from ternair.kernels.triton_fast import ternary_matmul_triton
+- Pin Python, PyTorch, and Ternair versions in deployment environments.
+- Treat model files as untrusted input and load only from controlled locations.
+- Use `eval()` and `torch.no_grad()` for inference.
+- Keep the PyTorch backend as a correctness fallback.
+- Do not claim a backend is faster until it has been benchmarked on the target hardware.
+- Keep tokenizer and model configuration together in an exported package.
 
-# 1-D ou 2-D, meme API
-y_1d = ternary_matmul_triton(packed, x_1d, gamma)      # -> (M,)
-y_2d = ternary_matmul_triton(packed, x_batch, gamma)   # -> (B, M)
-```
+## Project layout
 
-### Rotation Hadamard (QuaRot)
-
-Avant quantification INT8 des activations, une transformee de Hadamard rapide O(n log n) redistribue les outliers sur toutes les dimensions, reduisant l'erreur de quantification sans ajouter de parametres.
-
-### OmniQuant -- Echelle equivalente S
-
-Apprend une matrice diagonale S telle que `(X * S^-1) x (S * W) = X x W`. Optimisee pendant la calibration pour minimiser la distance de reconstruction entre le bloc FP16 et le bloc ternaire. Reduit la perte de perplexite de 15 a 20%.
-
-### BitAttention -- KV-Cache quantifie
-
-Les cles et valeurs du cache d'attention sont quantifiees en 2-bit par blocs de 32 tokens avec facteur d'echelle dynamique. L'empreinte memoire du KV-cache est divisee par 4 ou 8, rendant les fenetres de contexte 32k+ tokens praticables.
-
-### T-LoRA / BitDelta
-
-Decomposition des ajustements de poids en matrices de rang bas ternarisees `A x B` ou `A, B in {-1, 0, +1}`. Chaque adaptateur ne prend que quelques Ko pour specialiser le modele (code, medical, francais) sans toucher au coeur.
-
-### Ternary MoE
-
-Combinaison de la quantification 1.58-bit avec une architecture a Melange d'Experts. Seulement 2 experts sur 8 sont actifs par token. Le routage binaire selectionne les experts via un simple softmax + top-k.
-
-### Projection memoire SSD
-
-| Composant | Taille (profil 1 Gio) |
-|-----------|-----------------------|
-| Poids ternaires (conditionnes) | 776,2 Mio |
-| Embedding + tete LM (lies) | 160,0 Mio |
-| Echelles gamma | 5,1 Mio |
-| RMSNorm + tampons divers | 0,6 Mio |
-| **Total** | **941,9 Mio (< 1 Gio)** |
-
-### Rapport de compression
-
-```python
-from ternair.model.export import print_compression_report
-print_compression_report(model)
-
-# ============================================================
-#   Ternair Compression Report
-# ============================================================
-#   Total parameters      :    3,670,016
-#   Ternary parameters    :    3,670,016
-#   Storage mode          :   fastpacked
-# -----------------------------------------------------------
-#   FP16 equivalent       :       7.01 MiB
-#   Ternair size          :       0.52 MiB
-#   Compression ratio     :      13.56x
-#   Savings               :      92.6%
-# ============================================================
-```
-
-## Structure du projet
-
-```
+```text
 src/ternair/
-├── quantization/
-│   ├── linear.py         # TernairLinear avec alpha appris
-│   ├── ternary.py        # Recuit beta, ternarization STE
-│   ├── activation.py     # Hadamard + 8-bit + OmniQuant (v0.3.0)
-│   ├── bitdelta.py       # T-LoRA / BitDelta adapters (NOUVEAU v0.3.0)
-│   ├── distillation.py   # KL loss, Feature Matching, conversion HF
-│   └── packing.py        # Conditionnement base-3 (shim retrocompat v0.6.0)
-├── kernels/
-│   ├── inference.h       # Runtime C++ header-only
-│   ├── webternair.py     # WebGPU / Wasm backend (NOUVEAU v0.3.0)
-│   ├── cpu_matmul.h      # AVX-512 / ARM NEON matmul
-│   ├── packing_base8.py  # Codec base-8 canonique (NOUVEAU v0.6.0)
-│   ├── triton_fast.py    # Kernel Triton unifie (NOUVEAU v0.6.0)
-│   ├── triton_matmul.py  # Shim retrocompat (v0.6.0)
-│   └── ...
-├── model/
-│   ├── config.py         # Configuration + kv_cache_bits, num_experts
-│   ├── attention.py      # GQA + KV quant 2-bit (BitAttention v0.3.0)
-│   ├── moe.py            # Ternary MoE experts (NOUVEAU v0.3.0)
-│   ├── export.py         # Export SafeTensors + HuggingFace
-│   ├── generation.py     # Sampling avance, streaming, chat
-│   ├── inference.py      # TernairDirectInferencer (dispatch kernels, NOUVEAU v0.6.0)
-│   ├── loader.py         # load_ternair_model (HF LLaMA/Mistral, NOUVEAU v0.6.0)
-│   └── ...
-├── training/             # Planificateur WSD, optimiseur, entraineur
-├── benchmark/
-│   └── eval.py           # Suite d'evaluation
-├── cli.py                # Point d'entree CLI
-└── README.md             # Documentation complete
-
-scripts/
-├── train.py              # Point d'entree accelerate
-├── train_tiny.yaml       # Configuration de test
-├── train_one_gb.yaml     # Configuration 1 Gio
-├── demo_reel.py          # Pipeline de demonstration complet
-├── qat_distill.py        # Distillation QAT pour Colab
-├── test_ci.py            # Tests CI (17 tests v0.6.0 : generation, export, MoE, GGUF, pipeline, memory, packing_base8, triton_fast...)
-└── wordy_colab.py        # Script Colab Wordy
+  model/          model, generation, export, loader, backend dispatcher
+  quantization/   ternarization, STE, activations, adapters
+  kernels/        packing, NumPy, Triton, and C++ acceleration
+  training/       toy data, optimizer, scheduler, trainer, pipeline
+  benchmark/      size and evaluation utilities
+tests/            unit and integration tests
+scripts/          training, demo, and CI helpers
 ```
 
-## Performances
+## Contributing
 
-- 4,07 milliards de parametres ternaires stockes dans 942 Mio
-- Multiplication matricielle par additions et soustractions uniquement -- zero multiplication FP en inference
-- Compression 13.56x par rapport au FP16 equivalent
-- Memoire O(1) pour la generation (mode SSM -- sans cache KV)
-- Compression K-WTA : toute longueur d'entree -> 32 latents fixes
-- KV-Cache 2-bit (BitAttention) : memoire divisee par 4 ou 8 pour contextes longs
-- MoE : 12 milliards de parametres, cout de calcul d'un modele de 2 milliards
+Please add a regression test for bug fixes, keep public API changes documented, and run the relevant tests before opening a pull request. Performance changes should include a reproducible benchmark and a reference-path comparison.
 
-## Licence
+## License
 
-Apache 2.0
-
-Construit sur les travaux de recherche BitNet b1.58 de Microsoft Research (2024), BitDelta (2024), OmniQuant (2024), et BitMoE (2025).
+Apache-2.0. See [LICENSE](LICENSE).

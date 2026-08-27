@@ -30,7 +30,7 @@ from ternair.kernels.packed_ops import (
     ternary_matmul_numpy_batched,
     decode_fastpacked_row,
 )
-from ternair.kernels.triton_matmul import (
+from ternair.kernels.triton_fast import (
     has_triton,
     ternary_matmul_triton,
 )

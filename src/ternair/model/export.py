@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from ternair.errors import ArtifactError
 from ternair.model.config import TernairConfig
 from ternair.model.modeling import TernairForCausalLM
 from ternair.quantization.linear import TernairLinear
@@ -143,7 +144,7 @@ def _collect_ternary_tensors(model: TernairForCausalLM) -> dict[str, Tensor]:
                 tensors[f"{hf_name}.packed_weight"] = module.packed_weight
 
             # Gamma scale (FP32)
-            tensors[f"{hf_name}.gamma"] = module.gamma_eval
+            tensors[f"{hf_name}.gamma_eval"] = module.gamma_eval
 
             # If alpha is learned, export it too
             if module._use_learned_alpha and module.alpha is not None:
@@ -265,15 +266,23 @@ def export_to_safetensors(
     """
     if model.training:
         raise RuntimeError("Model must be in eval mode before export.")
+    if not output_path.lower().endswith(".safetensors"):
+        raise ArtifactError("SafeTensors export path must end with '.safetensors'.")
 
     tensors = _collect_ternary_tensors(model)
+    if not tensors:
+        raise ArtifactError("Cannot export an empty model artifact.")
     metadata = build_metadata(model.config) if include_metadata else None
 
     safetensor_bytes = _serialize_safetensors(tensors, metadata=metadata)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "wb") as f:
+    tmp_path = output_path + ".tmp"
+    with open(tmp_path, "wb") as f:
         f.write(safetensor_bytes)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, output_path)
 
     param_count = sum(t.numel() for t in tensors.values())
     total_bytes = len(safetensor_bytes)
@@ -316,6 +325,8 @@ def export_huggingface_package(
     output_dir
         The path to the created package directory.
     """
+    if not isinstance(output_dir, str) or not output_dir.strip():
+        raise ArtifactError("output_dir must be a non-empty path")
     if model.training:
         model.eval()
 

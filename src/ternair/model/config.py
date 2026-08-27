@@ -45,12 +45,7 @@ class TernairConfig:
     def __post_init__(self) -> None:
         # Valeurs par defaut conditionnelles
         if self.num_attn_layers < 0:
-            if self.attn_layer_period > 0:
-                # Pattern periodique: [SSM x (period-1), Attn] x N
-                # Nombre de couches d'attention = ceil(num_layers / period)
-                self.num_attn_layers = (self.num_hidden_layers + self.attn_layer_period - 1) // self.attn_layer_period
-            else:
-                self.num_attn_layers = self.num_hidden_layers
+            self.num_attn_layers = self.num_hidden_layers
         if self.thalamus_dim < 0:
             self.thalamus_dim = self.hidden_size
 

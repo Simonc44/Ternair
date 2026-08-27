@@ -32,6 +32,10 @@ class TernairBlock(nn.Module):
         self.mlp = TernairMLP(config)
         self.layer_idx = layer_idx
 
+    def reset_kv_cache(self) -> None:
+        """Clear this block's attention cache."""
+        self.attn.reset_kv_cache()
+
     def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:  # type: ignore[override]
         x_norm = self.ln_1(x)
         x = x + self.attn(x_norm, cos, sin)
