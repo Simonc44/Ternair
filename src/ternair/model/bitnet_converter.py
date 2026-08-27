@@ -159,6 +159,7 @@ def bitnet_config_to_ternair(hf_config: dict[str, Any], storage: str = "packed")
         rope_theta=float(_get("rope_theta", default=10000.0)),
         rms_norm_eps=float(_get("rms_norm_eps", "layer_norm_epsilon", default=1e-5)),
         tie_word_embeddings=bool(_get("tie_word_embeddings", default=True)),
+        hidden_act=str(_get("hidden_act", default="silu")),
         storage=storage,
         # Pure attention -- BitNet b1.58 has no SSM / MoE layers.
         num_attn_layers=num_hidden_layers,
@@ -249,21 +250,42 @@ def _default_dtype(dtype: torch.dtype) -> Iterator[None]:
         torch.set_default_dtype(old)
 
 
-def _scan_sub_norm_keys(checkpoint_files: list[str]) -> tuple[bool, bool]:
-    """Detect BitNet sub-layer norms from checkpoint keys (mmap, no data load)."""
+def _scan_checkpoint(
+    checkpoint_files: list[str],
+) -> tuple[bool, bool, bool, dict[str, float]]:
+    """Scan checkpoint keys without loading tensor data (mmap).
+
+    Returns ``(has_attn_sub_norm, has_ffn_sub_norm, has_offline_u8, scales)``.
+
+    ``has_offline_u8`` is True when the checkpoint stores the *already
+    ternarised* weights in the official BitNet offline format (U8 packed
+    projections + one ``weight_scale`` per tensor) instead of master
+    bf16 weights.  ``scales`` maps each projection key (e.g.
+    ``...self_attn.q_proj.weight``) to its ``weight_scale`` value.
+    """
     from safetensors import safe_open  # type: ignore
 
     has_attn = False
     has_ffn = False
+    has_u8 = False
+    scales: dict[str, float] = {}
     for path in checkpoint_files:
         if path.endswith(".bin"):
             tensors = torch.load(path, map_location="cpu", weights_only=True)
             try:
-                for k in tensors:
+                for k, v in tensors.items():
                     if k.endswith("self_attn.attn_sub_norm.weight"):
                         has_attn = True
-                    if k.endswith("mlp.ffn_sub_norm.weight"):
+                    elif k.endswith("mlp.ffn_sub_norm.weight"):
                         has_ffn = True
+                    elif k.endswith(".weight_scale"):
+                        base = k[: -len(".weight_scale")] + ".weight"
+                        try:
+                            scales[base] = float(v.reshape(-1)[0].item())
+                        except Exception:
+                            pass
+                    elif v.dtype == torch.uint8:
+                        has_u8 = True
             finally:
                 del tensors
         else:
@@ -271,11 +293,38 @@ def _scan_sub_norm_keys(checkpoint_files: list[str]) -> tuple[bool, bool]:
                 for k in f.keys():
                     if k.endswith("self_attn.attn_sub_norm.weight"):
                         has_attn = True
-                    if k.endswith("mlp.ffn_sub_norm.weight"):
+                    elif k.endswith("mlp.ffn_sub_norm.weight"):
                         has_ffn = True
-        if has_attn and has_ffn:
-            break
-    return has_attn, has_ffn
+                    elif k.endswith(".weight_scale"):
+                        # Tiny tensor -- read it now (few bytes).
+                        try:
+                            scales[k[: -len(".weight_scale")] + ".weight"] = float(
+                                f.get_tensor(k).reshape(-1)[0].item()
+                            )
+                        except Exception:
+                            pass
+                    elif f.get_slice(k).get_dtype() == "U8":
+                        has_u8 = True
+        if has_attn and has_ffn and has_u8:
+            pass  # keep scanning for scales
+    return has_attn, has_ffn, has_u8, scales
+
+
+def _unpack_bitnet_u8(packed: torch.Tensor) -> torch.Tensor:
+    """Unpack official BitNet offline U8 weights to int8 trits ``{-1,0,1}``.
+
+    The offline checkpoint packs 4 trits per byte, but **interleaved by
+    rows**: byte ``j`` of a ``(rows, cols)`` tensor (``rows = out // 4``)
+    holds the trits for rows ``j``, ``j + rows``, ``j + 2*rows``,
+    ``j + 3*rows`` in its lowest-to-highest 2-bit groups.  Stored values
+    are ``{0, 1, 2}`` for trits ``{-1, 0, +1}``.
+    """
+    rows, cols = packed.shape
+    out = rows * 4
+    unpacked = torch.zeros(out, cols, dtype=torch.uint8, device=packed.device)
+    for i in range(4):
+        unpacked[i * rows : (i + 1) * rows] = (packed & (3 << (2 * i))) >> (2 * i)
+    return unpacked.to(torch.int8) - 1
 
 
 def _copy_one_tensor(
@@ -283,20 +332,76 @@ def _copy_one_tensor(
     hf_key: str,
     tensor: torch.Tensor,
     report: ConvertReport,
+    scales: dict[str, float] | None = None,
 ) -> int:
-    """Copy one master tensor into the model; 1 on success, 0 if ignored."""
+    """Copy one master tensor into the model; 1 on success, 0 if ignored.
+
+    ``weight_scale`` tensors of the offline U8 format are consumed here
+    (they are not copied -- the scale is applied to the unpacked trits and
+    later written into ``gamma_eval``), so they are not reported as
+    ignored.
+    """
+    if hf_key.endswith(".weight_scale"):
+        return 0  # consumed by _apply_official_scales
     tern_key = _ternair_state_dict_path(hf_key)
     if tern_key is None:
         report.n_ignored_tensors += 1
         if len(report.ignored_keys) < 10:
             report.ignored_keys.append(hf_key)
         return 0
-    if _set_param(model, tern_key, tensor):
+    value = tensor
+    if tensor.dtype == torch.uint8:
+        # Official offline format: U8 packed trits, one scale per tensor.
+        trits = _unpack_bitnet_u8(tensor)
+        scale = (scales or {}).get(hf_key, 1.0)
+        value = trits.to(torch.bfloat16) * scale
+    if _set_param(model, tern_key, value):
         return 1
     report.n_ignored_tensors += 1
     if len(report.ignored_keys) < 10:
         report.ignored_keys.append(hf_key)
     return 0
+
+
+def _apply_official_scales(
+    model: TernairForCausalLM,
+    scales: dict[str, float],
+    report: ConvertReport,
+) -> None:
+    """Write the official per-tensor ``weight_scale`` into ``gamma_eval``.
+
+    The offline BitNet checkpoint uses one global scale per projection
+    instead of Ternair's per-row gamma; broadcasting it over the rows
+    keeps the dequantised weights bit-identical to the source.
+    """
+    from ternair.quantization.linear import TernairLinear
+
+    applied = 0
+    for hf_key, scale in scales.items():
+        tern_key = _ternair_state_dict_path(hf_key)
+        if tern_key is None:
+            continue
+        parts = tern_key.split(".")
+        cur: Any = model
+        ok = True
+        for p in parts[:-1]:
+            if not hasattr(cur, p):
+                ok = False
+                break
+            cur = getattr(cur, p)
+        if not ok or not isinstance(cur, TernairLinear):
+            continue
+        with torch.no_grad():
+            cur.gamma_eval.copy_(
+                torch.full_like(cur.gamma_eval, float(scale))
+            )
+            cur._invalidate_caches()
+        applied += 1
+    _LOGGER.info("Applied %d official weight scales", applied)
+    if applied == 0:
+        report.n_ignored_tensors += len(scales)
+        for k in list(scales)[:10]:
+            report.ignored_keys.append(k)
 
 
 def _drop_master_weights(model: TernairForCausalLM) -> None:
@@ -389,16 +494,25 @@ def convert_bitnet_checkpoint(
 
     checkpoint_files = _find_checkpoint_files(source_dir)
 
-    # Detect BitNet b1.58 sub-layer norms from the checkpoint keys (mmap
-    # scan -- cheap) and enable them in the config before building the
-    # model, so the architecture matches the official 2B-4T from the start.
-    has_attn_sub_norm, has_ffn_sub_norm = _scan_sub_norm_keys(checkpoint_files)
+    # Scan keys without loading data (mmap): detect the official sub-layer
+    # norms, whether the checkpoint stores master bf16 weights or the
+    # offline U8 (already-ternarised) format, and collect the per-tensor
+    # ``weight_scale`` values when present.
+    has_attn_sub_norm, has_ffn_sub_norm, has_offline_u8, scales = _scan_checkpoint(
+        checkpoint_files
+    )
     if (has_attn_sub_norm or has_ffn_sub_norm) and not ternair_config.use_sub_norm:
         _LOGGER.info(
             "Checkpoint has sub-layer norms (attn=%s ffn=%s); enabling use_sub_norm",
             has_attn_sub_norm, has_ffn_sub_norm,
         )
         ternair_config.use_sub_norm = True
+    if has_offline_u8:
+        _LOGGER.info(
+            "Checkpoint uses the offline U8 format (%d per-tensor scales): "
+            "weights are already ternarised, no re-ternarisation needed",
+            len(scales),
+        )
 
     # Build the model directly in bf16 (the master checkpoint dtype).  A
     # float32 build would need ~8 GB just for the parameters of a 2B model
@@ -406,9 +520,9 @@ def convert_bitnet_checkpoint(
     with _default_dtype(torch.bfloat16):
         model = TernairForCausalLM(ternair_config)
 
-    # Stream master weights one tensor at a time (safetensors mmap): copy
-    # into the model and discard immediately.  Never materialise the full
-    # checkpoint dict in RAM -- that is ~4.3 GB for the 2B-4T by itself.
+    # Stream weights one tensor at a time (safetensors mmap): copy into
+    # the model and discard immediately.  Never materialise the full
+    # checkpoint dict in RAM.
     _LOGGER.info("Loading master weights from %d shard(s) ...", len(checkpoint_files))
     n_loaded = 0
     for path in checkpoint_files:
@@ -416,7 +530,7 @@ def convert_bitnet_checkpoint(
             tensors = torch.load(path, map_location="cpu", weights_only=True)
             try:
                 for hf_key, tensor in tensors.items():
-                    n_loaded += _copy_one_tensor(model, hf_key, tensor, report)
+                    n_loaded += _copy_one_tensor(model, hf_key, tensor, report, scales)
             finally:
                 del tensors
         else:
@@ -426,16 +540,25 @@ def convert_bitnet_checkpoint(
                 for hf_key in f.keys():
                     tensor = f.get_tensor(hf_key)
                     try:
-                        n_loaded += _copy_one_tensor(model, hf_key, tensor, report)
+                        n_loaded += _copy_one_tensor(model, hf_key, tensor, report, scales)
                     finally:
                         del tensor
     report.n_loaded_tensors = n_loaded
 
-    # Ternarise + pack every linear layer (gamma = mean(|W|) per row).
+    # Ternarise + pack every linear layer.  For the offline U8 format the
+    # loaded master weights are already ternary (trits * scale), so the
+    # re-ternarisation is lossless -- it produces the same trits -- and we
+    # then overwrite gamma with the official per-tensor scale below.
     snapshot = model.freeze_storage()
     report.n_layers = len(snapshot)
     report.n_ternary_params = model.count_parameters(include_embedding=True)
     report.n_master_params = sum(p.numel() for p in model.parameters())
+
+    # Official offline checkpoints carry ONE scale per tensor (not a
+    # per-row gamma).  Overwrite gamma_eval with it so the dequantised
+    # weights match the source bit-for-bit.
+    if has_offline_u8 and scales:
+        _apply_official_scales(model, scales, report)
 
     # The eval path only reads the packed buffers after freeze_storage, so
     # drop the master fp weights now -- frees ~half of the model's RAM for

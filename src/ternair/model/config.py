@@ -23,6 +23,9 @@ class TernairConfig:
     rope_theta: float = 10000.0
     rms_norm_eps: float = 1e-5
     tie_word_embeddings: bool = True
+    # MLP activation: "silu" (SwiGLU, default) or "relu2" (SquaredReLU,
+    # used by the official BitNet b1.58 2B-4T checkpoint).
+    hidden_act: str = "silu"
     storage: str = "packed"  # one of: "int8", "packed", "fastpacked"
     # Hybrid architecture (SSM + attention)
     num_attn_layers: int = -1  # -1 → all layers are attention (legacy mode)

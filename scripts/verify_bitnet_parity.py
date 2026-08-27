@@ -34,12 +34,25 @@ import torch
 
 
 def _load_ref_logits(model_dir: str, ids: torch.Tensor) -> torch.Tensor:
-    """Load the HF reference model and return its logits for ``ids``."""
+    """Load the HF reference model and return its logits for ``ids``.
+
+    Two checkpoint formats are supported:
+
+    * master bf16 weights (older BitNet checkpoints): the plain model runs
+      the bf16 forward, no quantisation is applied;
+    * the official offline U8 format (the current 2B-4T): weights are
+      already-ternarised U8 packed projections + one ``weight_scale`` per
+      tensor.  ``AutoBitLinear`` is installed so the reference runs the
+      official pipeline: 8-bit per-token activation quantisation,
+      ternary weights, and the per-tensor scale.
+    """
+    from types import SimpleNamespace
+
     from transformers import AutoModelForCausalLM, AutoConfig
 
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
-    # Build the reference directly in bf16 (the master checkpoint dtype):
-    # a float32 build would need ~8 GB of RAM for the 2B model and can OOM
+    # Build the reference directly in bf16 (the checkpoint dtype): a
+    # float32 build would need ~8 GB of RAM for the 2B model and can OOM
     # the CI runner.
     old = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
@@ -48,9 +61,27 @@ def _load_ref_logits(model_dir: str, ids: torch.Tensor) -> torch.Tensor:
     finally:
         torch.set_default_dtype(old)
 
-    # Load the master weights from the checkpoint directory, copying each
-    # tensor straight into the model parameters (no second state-dict copy).
-    state = model.state_dict()
+    qc = getattr(config, "quantization_config", None)
+    if qc:
+        # Official offline-U8 checkpoint: install AutoBitLinear (8-bit
+        # activation quantisation + ternary weights + weight_scale).  Its
+        # load_state_dict pre-hook unpacks the U8 projections.
+        from transformers.integrations.bitnet import replace_with_bitnet_linear
+
+        qc = dict(qc) if isinstance(qc, dict) else {}
+        qc.setdefault("use_rms_norm", False)
+        qc.setdefault("rms_norm_eps", 1e-6)
+        replace_with_bitnet_linear(
+            model,
+            quantization_config=SimpleNamespace(**qc),
+            modules_to_not_convert=["lm_head"],
+        )
+        # The replacement runs under torch.device("meta"); materialise.
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to_empty(device=device)
+        model.to(torch.bfloat16)
+
+    # Stream weights from the checkpoint directory, one shard at a time.
     from safetensors import safe_open
 
     shards = sorted(
@@ -61,9 +92,15 @@ def _load_ref_logits(model_dir: str, ids: torch.Tensor) -> torch.Tensor:
     with torch.no_grad():
         for shard in shards:
             with safe_open(str(shard), framework="pt", device="cpu") as f:
-                for k in f.keys():
-                    if k in state and state[k].shape == f.get_slice(k).get_shape():
-                        state[k].copy_(f.get_tensor(k))
+                loaded = {k: f.get_tensor(k) for k in f.keys()}
+            model.load_state_dict(loaded, strict=False)
+            del loaded
+
+    # Tie the LM head to the embedding (the checkpoint omits it).
+    if model.config.tie_word_embeddings and model.lm_head is not None:
+        with torch.no_grad():
+            model.lm_head.weight.copy_(model.model.embed_tokens.weight)
+
     model.eval()
     with torch.no_grad():
         out = model(ids)
@@ -84,6 +121,11 @@ def _top1_agreement(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def main() -> int:
+    # The reference's AutoBitLinear/ActQuant are @torch.compile-decorated;
+    # fall back to eager everywhere (no C++ compiler needed, and faster on
+    # the CI runner than JIT-compiling a 2B model).
+    torch._dynamo.config.suppress_errors = True
+
     parser = argparse.ArgumentParser(description="Verify BitNet -> Ternair parity")
     parser.add_argument("--source", required=True, help="BitNet checkpoint dir (config.json + model.safetensors)")
     parser.add_argument("--output", required=True, help="Where to write the converted Ternair package")

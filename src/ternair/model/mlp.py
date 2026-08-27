@@ -29,19 +29,36 @@ class SiLU(nn.Module):
         return F.silu(x)
 
 
+class SquaredReLU(nn.Module):
+    """Squared ReLU -- the activation of the official BitNet b1.58 2B-4T.
+
+    relu2(x) = relu(x)^2
+    """
+
+    def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
+        return torch.square(F.relu(x))
+
+
+def _make_activation(name: str) -> nn.Module:
+    """Resolve ``hidden_act`` to a module (silu default, relu2 for BitNet)."""
+    act = (name or "silu").lower()
+    if act in ("relu2", "squaredrelu", "squared_relu"):
+        return SquaredReLU()
+    return SiLU()
+
+
 class TernairMLP(nn.Module):
-    """SwiGLU MLP, all projections ternary.
+    """Gated MLP, all projections ternary.
 
     Layout::
 
         gate = ternary_linear(x)            # (B, T, I)  - gate
         up   = ternary_linear(x)            # (B, T, I)  - value
-        h    = SiLU(gate) * up              # elementwise gating
+        h    = act(gate) * up               # elementwise gating
         y    = ternary_linear(h)            # (B, T, H)  - output
 
-    L'activation SwiGLU offre de meilleures performances que SquaredReLU
-    sur les taches de language, notamment combinee a la quantification
-    ternaire (BitNet b1.58 avec SwiGLU est la recommandation recente).
+    ``act`` is SiLU (SwiGLU, default) or SquaredReLU (``relu2``, the
+    activation of the official BitNet b1.58 2B-4T checkpoint).
     """
 
     def __init__(self, config: TernairConfig) -> None:
@@ -51,7 +68,7 @@ class TernairMLP(nn.Module):
         self.gate_proj = TernairLinear(S, I, bias=False, storage=config.storage)
         self.up_proj = TernairLinear(S, I, bias=False, storage=config.storage)
         self.down_proj = TernairLinear(I, S, bias=False, storage=config.storage)
-        self.act = SiLU()
+        self.act = _make_activation(getattr(config, "hidden_act", "silu"))
 
         # BitNet b1.58 sub-layer normalisation: applied on the gated
         # product before the down_proj projection.
@@ -72,4 +89,4 @@ class TernairMLP(nn.Module):
         return self.down_proj(h_q)
 
 
-__all__ = ["TernairMLP", "SiLU"]
+__all__ = ["TernairMLP", "SiLU", "SquaredReLU"]

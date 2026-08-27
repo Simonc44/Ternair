@@ -210,6 +210,7 @@ def build_hf_config(ternair_config: TernairConfig) -> dict:
         "rope_theta": ternair_config.rope_theta,
         "rms_norm_eps": ternair_config.rms_norm_eps,
         "tie_word_embeddings": ternair_config.tie_word_embeddings,
+        "hidden_act": getattr(ternair_config, "hidden_act", "silu"),
         "storage": ternair_config.storage,
         "attn_layer_period": ternair_config.attn_layer_period,
         "use_sub_norm": bool(getattr(ternair_config, "use_sub_norm", False)),
