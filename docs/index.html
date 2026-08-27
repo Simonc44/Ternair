@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ternair — Run BitNet Models. Smaller Files. One Command.</title>
+    <meta name="description" content="Load BitNet b1.58 models, serve via OpenAI API — 4x smaller, one pip install. Ternary neural networks in pure Python.">
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- Hero -->
+<section class="hero">
+    <div class="container">
+        <div class="badge">Open Source · Apache 2.0</div>
+        <h1>
+            Run BitNet Models.<br>
+            <span class="gradient">Smaller Files.</span><br>
+            One Command.
+        </h1>
+        <p class="hero-sub">
+            Ternair loads Microsoft's BitNet b1.58 models — including the real 2B-4T —
+            and serves them behind an OpenAI-compatible API. <strong>4× smaller files, pure Python, no C++ build.</strong>
+        </p>
+        <div class="hero-actions">
+            <a href="https://github.com/Simonc44/Ternair" class="btn btn-primary">⭐ Star on GitHub</a>
+            <a href="#install" class="btn btn-secondary">Get Started →</a>
+        </div>
+        <div class="hero-code">
+            <div class="code-header">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="code-title">terminal</span>
+            </div>
+            <pre><code><span class="code-comment"># Install</span>
+<span class="code-cmd">pip install</span> ternair
+
+<span class="code-comment"># Serve a real BitNet model</span>
+<span class="code-cmd">ternair serve</span> --model microsoft/bitnet-b1.58-2B-4T --port 8080
+
+<span class="code-comment"># Query it</span>
+<span class="code-cmd">curl</span> http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "ternair", "messages": [{"role": "user", "content": "Hello!"}]}'</code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- Stats -->
+<section class="stats">
+    <div class="container">
+        <div class="stat-grid">
+            <div class="stat">
+                <div class="stat-number">0.9958</div>
+                <div class="stat-label">Pearson correlation with BitNet</div>
+            </div>
+            <div class="stat">
+                <div class="stat-number">4×</div>
+                <div class="stat-label">Smaller than FP16</div>
+            </div>
+            <div class="stat">
+                <div class="stat-number">1.6</div>
+                <div class="stat-label">Bits per value</div>
+            </div>
+            <div class="stat">
+                <div class="stat-number">1</div>
+                <div class="stat-label">pip install</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- How it works -->
+<section class="how" id="install">
+    <div class="container">
+        <h2>How it works</h2>
+        <p class="section-sub">Three commands. That's it.</p>
+        <div class="steps">
+            <div class="step">
+                <div class="step-num">1</div>
+                <h3>Install</h3>
+                <code>pip install ternair</code>
+                <p>Pure Python. No C++ compiler. No CUDA toolkit. Just pip.</p>
+            </div>
+            <div class="step-arrow">→</div>
+            <div class="step">
+                <div class="step-num">2</div>
+                <h3>Convert</h3>
+                <code>ternair import-bitnet --source ./bitnet-2b4t --output ./ternair-2b4t</code>
+                <p>Bit-exact conversion. Same trained weights. 4× smaller file.</p>
+            </div>
+            <div class="step-arrow">→</div>
+            <div class="step">
+                <div class="step-num">3</div>
+                <h3>Serve</h3>
+                <code>ternair serve --model ./ternair-2b4t --port 8080</code>
+                <p>OpenAI-compatible API. Ready for your app.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Comparison -->
+<section class="comparison">
+    <div class="container">
+        <h2>Ternair vs BitNet</h2>
+        <p class="section-sub">Same brain. Smaller body. Ready to deploy.</p>
+        <div class="comparison-grid">
+            <div class="comp-col comp-ternair">
+                <h3>Ternair</h3>
+                <div class="comp-item win">✅ Load trained BitNet models (bit-exact)</div>
+                <div class="comp-item win">✅ 1.1 GB file (4× smaller)</div>
+                <div class="comp-item win">✅ OpenAI-compatible server</div>
+                <div class="comp-item win">✅ pip install</div>
+                <div class="comp-item win">✅ macOS / Linux / Windows</div>
+                <div class="comp-item win">✅ 1.6 bits/value packing</div>
+            </div>
+            <div class="comp-col comp-bitnet">
+                <h3>bitnet.cpp</h3>
+                <div class="comp-item">✅ Load trained BitNet models</div>
+                <div class="comp-item">~5 GB file (BF16)</div>
+                <div class="comp-item">❌ No official HTTP server</div>
+                <div class="comp-item">❌ C++ build required</div>
+                <div class="comp-item">macOS / Linux only</div>
+                <div class="comp-item">2 bits/value</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Features -->
+<section class="features">
+    <div class="container">
+        <h2>Everything you need</h2>
+        <div class="feature-grid">
+            <div class="feature">
+                <div class="feature-icon">⚡</div>
+                <h3>Ternary Weights</h3>
+                <p>{-1, 0, +1} weights with per-row absmean quantization. Same recipe as BitNet b1.58.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">📦</div>
+                <h3>Packed Storage</h3>
+                <p>Base-3 codec: 5 trits/byte (1.6 bits/value). 20% smaller than standard 2-bit packing.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🚀</div>
+                <h3>KV-Cache Inference</h3>
+                <p>Prefill once, decode one token per step. Correct RoPE position offsets. Streaming generation.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🌐</div>
+                <h3>OpenAI API Server</h3>
+                <p>/v1/completions, /v1/chat/completions, /v1/batch, /metrics. Zero external dependencies.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🔧</div>
+                <h3>Multiple Backends</h3>
+                <p>PyTorch (always works), NumPy, Triton GPU, C++ CPU. Automatic fallback per device.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">📊</div>
+                <h3>Prometheus Metrics</h3>
+                <p>Requests, tokens/s, latency percentiles. Ready for production monitoring.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Install section -->
+<section class="install-section">
+    <div class="container">
+        <h2>Get started in 30 seconds</h2>
+        <div class="install-code">
+            <div class="code-header">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="code-title">terminal</span>
+            </div>
+            <pre><code><span class="code-comment"># Install Ternair</span>
+<span class="code-cmd">pip install</span> ternair
+
+<span class="code-comment"># Quick test with a tiny model</span>
+<span class="code-cmd">ternair demo</span>
+
+<span class="code-comment"># Download and serve the real 2B-4T model</span>
+<span class="code-cmd">hf download</span> microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
+<span class="code-cmd">ternair import-bitnet</span> --source ./bitnet-2b4t --output ./ternair-2b4t --storage packed
+<span class="code-cmd">ternair serve</span> --model ./ternair-2b4t --port 8080</code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- CTA -->
+<section class="cta">
+    <div class="container">
+        <h2>Ready to run BitNet models?</h2>
+        <p>Join the project on GitHub. Open source, Apache 2.0.</p>
+        <div class="cta-actions">
+            <a href="https://github.com/Simonc44/Ternair" class="btn btn-primary btn-large">⭐ Star on GitHub</a>
+            <a href="https://github.com/Simonc44/Ternair#readme" class="btn btn-secondary btn-large">Read the Docs →</a>
+        </div>
+    </div>
+</section>
+
+<!-- Footer -->
+<footer>
+    <div class="container">
+        <div class="footer-content">
+            <div class="footer-brand">
+                <strong>Ternair</strong> · Apache 2.0
+            </div>
+            <div class="footer-links">
+                <a href="https://github.com/Simonc44/Ternair">GitHub</a>
+                <a href="https://github.com/Simonc44/Ternair#readme">Docs</a>
+                <a href="https://pypi.org/project/ternair/">PyPI</a>
+            </div>
+        </div>
+    </div>
+</footer>
+
+</body>
+</html>

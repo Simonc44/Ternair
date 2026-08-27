@@ -1,0 +1,446 @@
+/* =============================================
+   Ternair Landing Page — Dark Theme
+   ============================================= */
+
+:root {
+    --bg: #0a0a0f;
+    --bg-card: #12121a;
+    --bg-code: #1a1a2e;
+    --text: #e8e8f0;
+    --text-dim: #8888a0;
+    --accent: #6c5ce7;
+    --accent-light: #a29bfe;
+    --green: #00e676;
+    --green-dim: #00c853;
+    --red: #ff5252;
+    --yellow: #ffab40;
+    --border: #1e1e30;
+    --gradient-1: linear-gradient(135deg, #6c5ce7, #a29bfe);
+    --gradient-2: linear-gradient(135deg, #00e676, #69f0ae);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+
+.container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+/* ---- Hero ---- */
+.hero {
+    padding: 100px 0 60px;
+    text-align: center;
+    background: radial-gradient(ellipse at 50% 0%, rgba(108,92,231,0.15) 0%, transparent 60%);
+}
+
+.badge {
+    display: inline-block;
+    padding: 6px 16px;
+    border-radius: 100px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent-light);
+    border: 1px solid rgba(108,92,231,0.3);
+    margin-bottom: 24px;
+}
+
+h1 {
+    font-size: clamp(36px, 6vw, 64px);
+    font-weight: 800;
+    line-height: 1.1;
+    margin-bottom: 24px;
+    letter-spacing: -0.02em;
+}
+
+h1 .gradient {
+    background: var(--gradient-1);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.hero-sub {
+    font-size: 18px;
+    color: var(--text-dim);
+    max-width: 600px;
+    margin: 0 auto 32px;
+    line-height: 1.7;
+}
+
+.hero-sub strong {
+    color: var(--green);
+}
+
+.hero-actions {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    margin-bottom: 48px;
+}
+
+.btn {
+    display: inline-block;
+    padding: 12px 28px;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: all 0.2s;
+    cursor: pointer;
+    border: none;
+}
+
+.btn-primary {
+    background: var(--gradient-1);
+    color: #fff;
+}
+.btn-primary:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+.btn-secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+}
+.btn-secondary:hover {
+    border-color: var(--accent);
+    color: var(--accent-light);
+}
+
+.btn-large {
+    padding: 16px 36px;
+    font-size: 17px;
+}
+
+/* Code block */
+.hero-code, .install-code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    max-width: 720px;
+    margin: 0 auto;
+    text-align: left;
+    overflow: hidden;
+}
+
+.code-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.02);
+}
+
+.dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+.dot.red { background: #ff5f56; }
+.dot.yellow { background: #ffbd2e; }
+.dot.green { background: #27c93f; }
+
+.code-title {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+}
+
+pre {
+    padding: 20px 24px;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.8;
+}
+
+code {
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.code-comment { color: #5c6370; }
+.code-cmd { color: var(--green); font-weight: 500; }
+
+/* ---- Stats ---- */
+.stats {
+    padding: 60px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 32px;
+    text-align: center;
+}
+
+.stat-number {
+    font-size: 42px;
+    font-weight: 800;
+    background: var(--gradient-1);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.stat-label {
+    font-size: 14px;
+    color: var(--text-dim);
+    margin-top: 4px;
+}
+
+/* ---- How it works ---- */
+.how, .features, .install-section {
+    padding: 80px 0;
+}
+
+h2 {
+    font-size: 36px;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 8px;
+}
+
+.section-sub {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 17px;
+    margin-bottom: 48px;
+}
+
+.steps {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    justify-content: center;
+}
+
+.step {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px 24px;
+    flex: 1;
+    max-width: 300px;
+    text-align: center;
+}
+
+.step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--gradient-1);
+    color: #fff;
+    font-weight: 700;
+    font-size: 16px;
+    margin-bottom: 16px;
+}
+
+.step h3 {
+    font-size: 18px;
+    margin-bottom: 12px;
+}
+
+.step code {
+    display: block;
+    background: var(--bg-code);
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--green);
+    margin-bottom: 12px;
+    word-break: break-all;
+}
+
+.step p {
+    font-size: 14px;
+    color: var(--text-dim);
+}
+
+.step-arrow {
+    font-size: 24px;
+    color: var(--accent);
+    padding-top: 60px;
+    flex-shrink: 0;
+}
+
+/* ---- Comparison ---- */
+.comparison {
+    padding: 80px 0;
+    background: var(--bg-card);
+}
+
+.comparison-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.comp-col {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+}
+
+.comp-col h3 {
+    font-size: 20px;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.comp-ternair h3 {
+    color: var(--accent-light);
+}
+
+.comp-item {
+    padding: 10px 0;
+    font-size: 15px;
+    color: var(--text-dim);
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.comp-item.win {
+    color: var(--green);
+}
+
+/* ---- Features ---- */
+.feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+}
+
+.feature {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    transition: border-color 0.2s;
+}
+
+.feature:hover {
+    border-color: var(--accent);
+}
+
+.feature-icon {
+    font-size: 28px;
+    margin-bottom: 16px;
+}
+
+.feature h3 {
+    font-size: 17px;
+    margin-bottom: 8px;
+}
+
+.feature p {
+    font-size: 14px;
+    color: var(--text-dim);
+    line-height: 1.6;
+}
+
+/* ---- Install section ---- */
+.install-section {
+    background: radial-gradient(ellipse at 50% 100%, rgba(0,230,118,0.08) 0%, transparent 60%);
+}
+
+.install-code {
+    max-width: 680px;
+}
+
+/* ---- CTA ---- */
+.cta {
+    padding: 80px 0;
+    text-align: center;
+    border-top: 1px solid var(--border);
+}
+
+.cta h2 {
+    margin-bottom: 12px;
+}
+
+.cta p {
+    color: var(--text-dim);
+    font-size: 17px;
+    margin-bottom: 32px;
+}
+
+.cta-actions {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+}
+
+/* ---- Footer ---- */
+footer {
+    padding: 32px 0;
+    border-top: 1px solid var(--border);
+}
+
+.footer-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.footer-brand {
+    font-size: 14px;
+    color: var(--text-dim);
+}
+
+.footer-links {
+    display: flex;
+    gap: 24px;
+}
+
+.footer-links a {
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: 14px;
+    transition: color 0.2s;
+}
+
+.footer-links a:hover {
+    color: var(--accent-light);
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 768px) {
+    .hero { padding: 60px 0 40px; }
+    h1 { font-size: 32px; }
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    .steps { flex-direction: column; align-items: center; }
+    .step-arrow { transform: rotate(90deg); padding: 0; }
+    .comparison-grid { grid-template-columns: 1fr; }
+    .feature-grid { grid-template-columns: 1fr; }
+    .hero-actions, .cta-actions { flex-direction: column; align-items: center; }
+    .footer-content { flex-direction: column; gap: 16px; text-align: center; }
+}
