@@ -48,16 +48,21 @@ def _load_ref_logits(model_dir: str, ids: torch.Tensor) -> torch.Tensor:
     """
     from types import SimpleNamespace
 
-    from transformers import AutoModelForCausalLM, AutoConfig
+    # The checkpoint's config.json declares custom code (``auto_map``) but
+    # the repo does NOT ship ``configuration_bitnet.py`` -- the official
+    # class lives in transformers' native ``bitnet`` module (5.x).  Load
+    # the concrete class directly to avoid the remote-code fetch that
+    # would fail on the missing file.
+    from transformers.models.bitnet import BitNetConfig, BitNetForCausalLM
 
-    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+    config = BitNetConfig.from_pretrained(model_dir)
     # Build the reference directly in bf16 (the checkpoint dtype): a
     # float32 build would need ~8 GB of RAM for the 2B model and can OOM
     # the CI runner.
     old = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
     try:
-        model = AutoModelForCausalLM.from_config(config)
+        model = BitNetForCausalLM(config)
     finally:
         torch.set_default_dtype(old)
 
@@ -170,7 +175,7 @@ def main() -> int:
         ids = torch.randint(0, max(vocab - 1, 2), (1, min(16, max(vocab - 1, 2))))
 
     ref = _load_ref_logits(args.source, ids)
-    model, _ = load_converted_model(args.output, device="cpu")
+    model, _ = load_converted_model(args.output, device="cpu", dtype=torch.bfloat16)
     model.eval()
     with torch.no_grad():
         got = model(ids).float()

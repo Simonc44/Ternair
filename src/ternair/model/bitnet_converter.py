@@ -613,7 +613,7 @@ def _copy_tokenizer_files(source_dir: str, output_dir: str) -> None:
 def load_converted_model(
     model_dir: str,
     device: str | None = None,
-    dtype: torch.dtype = torch.float16,
+    dtype: torch.dtype = torch.bfloat16,
 ):
     """Load a converted Ternair package (native ``packed_weight`` schema).
 
@@ -625,7 +625,8 @@ def load_converted_model(
     device
         Target device (``"cuda"`` / ``"cpu"``).  ``None`` = auto-detect.
     dtype
-        Float dtype for the dequantised weight cache (default FP16).
+        Float dtype for the dequantised weight cache (default BF16).  BF16 is
+        needed for relu2 models where intermediate activations can overflow fp16.
 
     Returns
     -------

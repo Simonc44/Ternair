@@ -71,7 +71,12 @@ class TernairModel(nn.Module):
 
     def forward(self, input_ids: Tensor, use_cache: bool = False) -> Tensor:  # type: ignore[override]
         x = self.embed_tokens(input_ids)
-        x = quantize_activations_8bit_forward(x)
+        # NOTE: no model-level activation quantisation here.  The official
+        # BitNet b1.58 pipeline quantises each projection input *inside*
+        # the attention / MLP blocks (per-token 8-bit, matching
+        # ``AutoBitLinear``); an extra quantise of the embedding output
+        # would double-round values and break bit-parity with the source
+        # checkpoint.
         seq_len = x.shape[1]
         # During decode with KV-cache, RoPE must cover the absolute
         # position of the new token (kv_cache_len).
