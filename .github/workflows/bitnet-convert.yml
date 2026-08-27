@@ -91,7 +91,7 @@ jobs:
       - name: Upload converted package
         uses: actions/upload-artifact@v4
         with:
-          name: ternair-${{ inputs.model_id }}-${{ inputs.storage }}
+          name: ternair-${{ github.run_number }}-${{ inputs.storage }}
           path: |
             ternair-converted/
             parity-report.json
