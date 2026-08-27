@@ -1,227 +1,626 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ternair — Run BitNet Models. Smaller Files. One Command.</title>
-    <meta name="description" content="Load BitNet b1.58 models, serve via OpenAI API — 4x smaller, one pip install. Ternary neural networks in pure Python.">
-    <link rel="stylesheet" href="style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ternair — Run BitNet models. Quarter the size.</title>
+<meta name="description" content="Ternair loads Microsoft's BitNet b1.58 models and serves them behind an OpenAI-compatible API. 4× smaller files, pure Python, one pip install.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+
+/* ============================================
+   TOKENS
+   ============================================ */
+:root{
+  --bg:            #0A0C0F;
+  --bg-raised:     #101318;
+  --bg-card:       #12151B;
+  --bg-card-hover: #161A21;
+  --border:        #1F242C;
+  --border-soft:   #181C23;
+
+  --text-1: #ECEAE4;
+  --text-2: #9298A3;
+  --text-3: #575D68;
+
+  /* the three ternary states drive every accent in this design */
+  --neg: #5B84FF;   /* -1 : cool  */
+  --zero:#6B7280;   /*  0 : inert */
+  --pos: #FF8F4D;   /* +1 : warm  */
+
+  --neg-dim: rgba(91,132,255,0.12);
+  --pos-dim: rgba(255,143,77,0.12);
+
+  --font-display: 'Space Grotesk', 'Inter', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --container: 1120px;
+  --radius: 10px;
+  --ease: cubic-bezier(.16,.8,.24,1);
+}
+
+*{ box-sizing:border-box; margin:0; padding:0; }
+html{ scroll-behavior:smooth; }
+@media (prefers-reduced-motion: reduce){
+  html{ scroll-behavior:auto; }
+  *{ animation-duration:0.001ms !important; animation-iteration-count:1 !important; transition-duration:0.001ms !important; }
+}
+
+body{
+  background:var(--bg);
+  color:var(--text-1);
+  font-family:var(--font-body);
+  font-size:16px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+
+a{ color:inherit; text-decoration:none; }
+:focus-visible{ outline:2px solid var(--pos); outline-offset:3px; border-radius:4px; }
+
+.container{ max-width:var(--container); margin:0 auto; padding:0 32px; }
+section{ position:relative; }
+
+h1,h2,h3{ font-family:var(--font-display); font-weight:600; letter-spacing:-0.02em; color:var(--text-1); }
+
+.eyebrow{
+  display:inline-flex; align-items:center; gap:8px;
+  font-family:var(--font-mono); font-size:12px; letter-spacing:0.08em; text-transform:uppercase;
+  color:var(--text-3);
+}
+.eyebrow .trit-dot{ width:5px; height:5px; border-radius:1px; }
+
+/* ============================================
+   BACKGROUND TEXTURE — ternary weight field
+   ============================================ */
+.weight-field{
+  position:absolute; inset:0; overflow:hidden; pointer-events:none;
+  background-image:
+    radial-gradient(circle at center, var(--neg) 0 1px, transparent 1.2px),
+    radial-gradient(circle at center, var(--zero) 0 1px, transparent 1.2px),
+    radial-gradient(circle at center, var(--pos) 0 1px, transparent 1.2px);
+  background-size: 34px 34px, 34px 34px, 34px 34px;
+  background-position: 0 0, 12px 18px, 24px 6px;
+  opacity:0.12;
+  mask-image: radial-gradient(ellipse 70% 60% at 70% 20%, black 10%, transparent 75%);
+}
+
+/* ============================================
+   NAV
+   ============================================ */
+.nav{
+  position:sticky; top:0; z-index:50;
+  background:rgba(10,12,15,0.82);
+  backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--border-soft);
+}
+.nav-inner{
+  display:flex; align-items:center; justify-content:space-between;
+  height:64px;
+}
+.logo{ display:flex; align-items:center; gap:11px; font-family:var(--font-display); font-weight:600; font-size:16px; letter-spacing:0.01em; }
+.logo-mark{ display:flex; gap:3px; }
+.logo-mark span{ width:6px; height:14px; border-radius:2px; display:block; }
+.logo-mark span:nth-child(1){ background:var(--neg); }
+.logo-mark span:nth-child(2){ background:var(--zero); transform:translateY(3px); }
+.logo-mark span:nth-child(3){ background:var(--pos); }
+
+.nav-links{ display:flex; align-items:center; gap:32px; }
+.nav-links a{ font-size:14px; color:var(--text-2); transition:color .15s var(--ease); }
+.nav-links a:hover{ color:var(--text-1); }
+.nav-pip{
+  font-family:var(--font-mono); font-size:12.5px; color:var(--text-2);
+  background:var(--bg-card); border:1px solid var(--border);
+  padding:7px 12px; border-radius:6px;
+}
+.nav-pip b{ color:var(--pos); font-weight:500; }
+
+@media (max-width: 760px){
+  .nav-links a:not(.nav-pip-wrap){ display:none; }
+}
+
+/* ============================================
+   BUTTONS
+   ============================================ */
+.btn{
+  display:inline-flex; align-items:center; gap:8px;
+  font-size:14px; font-weight:500; font-family:var(--font-body);
+  padding:11px 20px; border-radius:7px;
+  border:1px solid transparent;
+  transition:transform .15s var(--ease), border-color .15s var(--ease), background .15s var(--ease);
+  cursor:pointer;
+  white-space:nowrap;
+}
+.btn:hover{ transform:translateY(-1px); }
+.btn-primary{ background:var(--text-1); color:var(--bg); }
+.btn-primary:hover{ background:#fff; }
+.btn-outline{ background:transparent; border-color:var(--border); color:var(--text-1); }
+.btn-outline:hover{ border-color:var(--text-3); }
+.btn svg{ width:14px; height:14px; }
+
+/* ============================================
+   HERO
+   ============================================ */
+.hero{ padding:104px 0 88px; }
+.hero-grid{
+  display:grid; grid-template-columns:1.05fr 0.95fr; gap:64px; align-items:start;
+}
+@media (max-width: 900px){ .hero-grid{ grid-template-columns:1fr; } }
+
+.hero h1{
+  font-size:clamp(36px, 5vw, 54px);
+  line-height:1.06;
+  margin:18px 0 22px;
+}
+.hero h1 .accent-pos{ color:var(--pos); }
+
+.hero-sub{
+  font-size:16.5px; color:var(--text-2); max-width:46ch; margin-bottom:32px;
+}
+.hero-sub strong{ color:var(--text-1); font-weight:600; }
+
+.hero-actions{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:44px; }
+
+.hero-terminal{ margin-top:0; }
+
+/* signature: trit → byte packing diagram */
+.pack-diagram{
+  border:1px solid var(--border); border-radius:var(--radius);
+  background:var(--bg-card);
+  padding:26px 24px 22px;
+}
+.pack-label{
+  font-family:var(--font-mono); font-size:11px; letter-spacing:0.08em; text-transform:uppercase;
+  color:var(--text-3); margin-bottom:18px; display:block;
+}
+.pack-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.trit{
+  width:42px; height:42px; border-radius:7px;
+  display:flex; align-items:center; justify-content:center;
+  font-family:var(--font-mono); font-size:13px; font-weight:500;
+  border:1px solid var(--border);
+}
+.trit.n{ color:var(--neg); background:var(--neg-dim); border-color:rgba(91,132,255,0.28); }
+.trit.z{ color:var(--zero); background:rgba(107,114,128,0.1); border-color:var(--border); }
+.trit.p{ color:var(--pos); background:var(--pos-dim); border-color:rgba(255,143,77,0.28); }
+.pack-arrow{ color:var(--text-3); font-size:15px; padding:0 4px; }
+.byte-box{
+  height:42px; padding:0 16px; border-radius:7px;
+  display:flex; align-items:center; justify-content:center; gap:8px;
+  background:linear-gradient(135deg, var(--neg-dim), var(--pos-dim));
+  border:1px solid var(--border);
+  font-family:var(--font-mono); font-size:12.5px; color:var(--text-1);
+}
+.pack-caption{ margin-top:16px; font-size:13px; color:var(--text-3); }
+.pack-caption b{ color:var(--text-2); font-weight:500; }
+
+/* terminal */
+.terminal{
+  border:1px solid var(--border); border-radius:var(--radius);
+  background:var(--bg-raised);
+  overflow:hidden;
+}
+.terminal-head{
+  display:flex; align-items:center; gap:8px;
+  padding:11px 16px; border-bottom:1px solid var(--border-soft);
+}
+.tdot{ width:8px; height:8px; border-radius:50%; background:var(--border); }
+.terminal-head span:last-child{
+  margin-left:8px; font-family:var(--font-mono); font-size:11.5px; color:var(--text-3);
+}
+.terminal pre{
+  padding:18px 20px 20px; overflow-x:auto;
+  font-family:var(--font-mono); font-size:13px; line-height:1.85;
+}
+.c-comment{ color:var(--text-3); }
+.c-cmd{ color:var(--pos); }
+.c-str{ color:var(--neg); }
+.c-plain{ color:var(--text-2); }
+
+/* ============================================
+   STAT RAIL
+   ============================================ */
+.stat-rail{
+  border-top:1px solid var(--border-soft);
+  border-bottom:1px solid var(--border-soft);
+  padding:36px 0;
+}
+.stat-grid{ display:grid; grid-template-columns:repeat(4, 1fr); }
+.stat{ padding:0 24px; border-left:1px solid var(--border-soft); }
+.stat:first-child{ border-left:none; padding-left:0; }
+.stat-num{ font-family:var(--font-mono); font-size:26px; font-weight:500; color:var(--text-1); }
+.stat-label{ font-size:12.5px; color:var(--text-3); margin-top:5px; }
+@media (max-width: 760px){
+  .stat-grid{ grid-template-columns:repeat(2, 1fr); row-gap:24px; }
+  .stat:nth-child(3){ border-left:none; padding-left:0; }
+}
+
+/* ============================================
+   SECTION HEADERS
+   ============================================ */
+.section{ padding:96px 0; }
+.section-head{ margin-bottom:52px; max-width:56ch; }
+.section-head h2{ font-size:clamp(26px, 3vw, 34px); margin-top:14px; }
+.section-head p{ color:var(--text-2); margin-top:12px; font-size:15px; }
+
+/* ============================================
+   HOW IT WORKS
+   ============================================ */
+.steps{ display:grid; grid-template-columns:repeat(3, 1fr); gap:1px; background:var(--border-soft); border:1px solid var(--border-soft); border-radius:var(--radius); overflow:hidden; }
+.step{ background:var(--bg); padding:30px 26px; }
+.step-num{ font-family:var(--font-mono); font-size:12.5px; color:var(--text-3); margin-bottom:16px; }
+.step h3{ font-size:17px; margin-bottom:10px; }
+.step code{
+  display:block; font-family:var(--font-mono); font-size:12.5px; color:var(--pos);
+  background:var(--bg-card); border:1px solid var(--border); border-radius:6px;
+  padding:9px 11px; margin-bottom:14px; overflow-x:auto; white-space:nowrap;
+}
+.step p{ font-size:13.5px; color:var(--text-2); }
+@media (max-width: 760px){ .steps{ grid-template-columns:1fr; } }
+
+/* ============================================
+   COMPARISON
+   ============================================ */
+.compare{ border:1px solid var(--border-soft); border-radius:var(--radius); overflow:hidden; }
+.compare-row{
+  display:grid; grid-template-columns:1.4fr 1fr 1fr;
+  border-top:1px solid var(--border-soft);
+  font-size:14px;
+}
+.compare-row:first-child{ border-top:none; background:var(--bg-card); }
+.compare-row > div{ padding:15px 20px; }
+.compare-row > div:not(:first-child){ border-left:1px solid var(--border-soft); }
+.compare-row.head{ font-family:var(--font-mono); font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-3); }
+.compare-row .feat{ color:var(--text-2); }
+.compare-row .win{ color:var(--pos); position:relative; }
+.compare-row .win::before{ content:""; position:absolute; left:0; top:0; bottom:0; width:2px; background:var(--pos); }
+.compare-row .neutral{ color:var(--text-2); }
+@media (max-width: 700px){
+  .compare-row{ grid-template-columns:1fr; }
+  .compare-row > div:not(:first-child){ border-left:none; border-top:1px solid var(--border-soft); }
+}
+
+/* ============================================
+   FEATURES
+   ============================================ */
+.feat-grid{ display:grid; grid-template-columns:repeat(3, 1fr); gap:1px; background:var(--border-soft); border:1px solid var(--border-soft); border-radius:var(--radius); overflow:hidden; }
+.feat-card{ background:var(--bg); padding:30px 26px; transition:background .2s var(--ease); }
+.feat-card:hover{ background:var(--bg-card); }
+.feat-icon{ width:30px; height:30px; margin-bottom:20px; color:var(--text-2); }
+.feat-icon svg{ width:100%; height:100%; }
+.feat-card h3{ font-size:15.5px; margin-bottom:9px; }
+.feat-card p{ font-size:13.5px; color:var(--text-2); line-height:1.65; }
+@media (max-width: 900px){ .feat-grid{ grid-template-columns:1fr 1fr; } }
+@media (max-width: 600px){ .feat-grid{ grid-template-columns:1fr; } }
+
+/* ============================================
+   INSTALL
+   ============================================ */
+.install-section .terminal{ max-width:640px; }
+
+/* ============================================
+   CTA
+   ============================================ */
+.cta{ padding:110px 0; text-align:center; border-top:1px solid var(--border-soft); }
+.cta h2{ font-size:clamp(28px, 4vw, 38px); }
+.cta p{ color:var(--text-2); margin:14px 0 34px; font-size:15px; }
+.cta-actions{ display:flex; gap:14px; justify-content:center; flex-wrap:wrap; }
+
+/* ============================================
+   FOOTER
+   ============================================ */
+footer{ border-top:1px solid var(--border-soft); padding:34px 0; }
+.footer-inner{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; }
+.footer-brand{ display:flex; align-items:center; gap:11px; font-size:13.5px; color:var(--text-3); }
+.footer-links{ display:flex; gap:26px; }
+.footer-links a{ font-size:13.5px; color:var(--text-2); transition:color .15s var(--ease); }
+.footer-links a:hover{ color:var(--text-1); }
+
+/* ============================================
+   SCROLL REVEAL
+   ============================================ */
+.reveal{ opacity:0; transform:translateY(14px); transition:opacity .6s var(--ease), transform .6s var(--ease); }
+.reveal.is-visible{ opacity:1; transform:translateY(0); }
+
+</style>
 </head>
 <body>
 
-<!-- Hero -->
+<nav class="nav">
+  <div class="container nav-inner">
+    <a href="#" class="logo">
+      <span class="logo-mark"><span></span><span></span><span></span></span>
+      TERNAIR
+    </a>
+    <div class="nav-links">
+      <a href="https://github.com/Simonc44/Ternair#readme">Docs</a>
+      <a href="https://pypi.org/project/ternair/">PyPI</a>
+      <a href="https://github.com/Simonc44/Ternair">GitHub</a>
+      <span class="nav-pip nav-pip-wrap">$ <b>pip install</b> git+…/Ternair</span>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
 <section class="hero">
-    <div class="container">
-        <div class="badge">Open Source · Apache 2.0</div>
-        <h1>
-            Run BitNet Models.<br>
-            <span class="gradient">Smaller Files.</span><br>
-            One Command.
-        </h1>
-        <p class="hero-sub">
-            Ternair loads Microsoft's BitNet b1.58 models — including the real 2B-4T —
-            and serves them behind an OpenAI-compatible API. <strong>4× smaller files, pure Python, no C++ build.</strong>
-        </p>
-        <div class="hero-actions">
-            <a href="https://github.com/Simonc44/Ternair" class="btn btn-primary">⭐ Star on GitHub</a>
-            <a href="#install" class="btn btn-secondary">Get Started →</a>
-        </div>
-        <div class="hero-code">
-            <div class="code-header">
-                <span class="dot red"></span>
-                <span class="dot yellow"></span>
-                <span class="dot green"></span>
-                <span class="code-title">terminal</span>
-            </div>
-            <pre><code><span class="code-comment"># Install</span>
-<span class="code-cmd">pip install</span> ternair
+  <div class="weight-field"></div>
+  <div class="container hero-grid">
+    <div>
+      <span class="eyebrow"><span class="trit-dot" style="background:var(--pos)"></span>Open source · Apache 2.0</span>
+      <h1>BitNet models,<br>quarter the <span class="accent-pos">size</span>.</h1>
+      <p class="hero-sub">
+        Ternair loads Microsoft's BitNet b1.58 checkpoints — including the real 2B-4T — and serves them behind
+        an OpenAI-compatible API. <strong>Pure Python, no C++ toolchain, one command to serve.</strong>
+      </p>
+      <div class="hero-actions">
+        <a href="https://github.com/Simonc44/Ternair" class="btn btn-primary">
+          Star on GitHub
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </a>
+        <a href="#install" class="btn btn-outline">Get started</a>
+      </div>
 
-<span class="code-comment"># Serve a real BitNet model</span>
-<span class="code-cmd">ternair serve</span> --model microsoft/bitnet-b1.58-2B-4T --port 8080
-
-<span class="code-comment"># Query it</span>
-<span class="code-cmd">curl</span> http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "ternair", "messages": [{"role": "user", "content": "Hello!"}]}'</code></pre>
+      <div class="terminal hero-terminal">
+        <div class="terminal-head">
+          <span class="tdot"></span><span class="tdot"></span><span class="tdot"></span>
+          <span>zsh</span>
         </div>
+        <pre><code><span class="c-comment"># install</span>
+<span class="c-cmd">pip install</span> <span class="c-plain">git+https://github.com/Simonc44/Ternair</span>
+
+<span class="c-comment"># serve a real BitNet model</span>
+<span class="c-cmd">ternair serve</span> <span class="c-plain">--model microsoft/bitnet-b1.58-2B-4T --port 8080</span>
+
+<span class="c-comment"># query it</span>
+<span class="c-cmd">curl</span> <span class="c-plain">localhost:8080/v1/chat/completions \
+  -d</span> <span class="c-str">'{"messages":[{"role":"user","content":"Hello!"}]}'</span></code></pre>
+      </div>
     </div>
+
+    <div class="pack-diagram" aria-hidden="false">
+      <span class="pack-label">How storage works — 5 trits, 1 byte</span>
+      <div class="pack-row">
+        <div class="trit n">−1</div>
+        <div class="trit z">0</div>
+        <div class="trit p">+1</div>
+        <div class="trit p">+1</div>
+        <div class="trit n">−1</div>
+        <span class="pack-arrow">→</span>
+        <div class="byte-box">0xA7</div>
+      </div>
+      <p class="pack-caption">
+        A base-3 codec packs five ternary weights into a single byte —
+        <b>1.6 bits per value</b>, 20% denser than standard 2-bit packing.
+      </p>
+    </div>
+  </div>
 </section>
 
-<!-- Stats -->
-<section class="stats">
-    <div class="container">
-        <div class="stat-grid">
-            <div class="stat">
-                <div class="stat-number">0.9958</div>
-                <div class="stat-label">Pearson correlation with BitNet</div>
-            </div>
-            <div class="stat">
-                <div class="stat-number">4×</div>
-                <div class="stat-label">Smaller than FP16</div>
-            </div>
-            <div class="stat">
-                <div class="stat-number">1.6</div>
-                <div class="stat-label">Bits per value</div>
-            </div>
-            <div class="stat">
-                <div class="stat-number">1</div>
-                <div class="stat-label">pip install</div>
-            </div>
-        </div>
+<!-- STATS -->
+<section class="stat-rail">
+  <div class="container stat-grid">
+    <div class="stat">
+      <div class="stat-num">0.9958</div>
+      <div class="stat-label">Pearson correlation with BitNet</div>
     </div>
+    <div class="stat">
+      <div class="stat-num">4×</div>
+      <div class="stat-label">Smaller than FP16</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">1.6</div>
+      <div class="stat-label">Bits per value</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">1</div>
+      <div class="stat-label">Command to serve</div>
+    </div>
+  </div>
 </section>
 
-<!-- How it works -->
-<section class="how" id="install">
-    <div class="container">
-        <h2>How it works</h2>
-        <p class="section-sub">Three commands. That's it.</p>
-        <div class="steps">
-            <div class="step">
-                <div class="step-num">1</div>
-                <h3>Install</h3>
-                <code>pip install ternair</code>
-                <p>Pure Python. No C++ compiler. No CUDA toolkit. Just pip.</p>
-            </div>
-            <div class="step-arrow">→</div>
-            <div class="step">
-                <div class="step-num">2</div>
-                <h3>Convert</h3>
-                <code>ternair import-bitnet --source ./bitnet-2b4t --output ./ternair-2b4t</code>
-                <p>Bit-exact conversion. Same trained weights. 4× smaller file.</p>
-            </div>
-            <div class="step-arrow">→</div>
-            <div class="step">
-                <div class="step-num">3</div>
-                <h3>Serve</h3>
-                <code>ternair serve --model ./ternair-2b4t --port 8080</code>
-                <p>OpenAI-compatible API. Ready for your app.</p>
-            </div>
-        </div>
+<!-- HOW IT WORKS -->
+<section class="section reveal">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow"><span class="trit-dot" style="background:var(--zero)"></span>Workflow</span>
+      <h2>Three commands. That's it.</h2>
+      <p>No build step, no CUDA toolkit — convert once, then serve from anywhere.</p>
     </div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">01</div>
+        <h3>Install</h3>
+        <code>pip install git+https://github.com/Simonc44/Ternair</code>
+        <p>Pure Python. No C++ compiler, no CUDA toolkit — just pip.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">02</div>
+        <h3>Convert</h3>
+        <code>ternair import-bitnet --source ./bitnet-2b4t --output ./ternair-2b4t</code>
+        <p>Bit-exact conversion of the trained weights into a 4× smaller file.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">03</div>
+        <h3>Serve</h3>
+        <code>ternair serve --model ./ternair-2b4t --port 8080</code>
+        <p>An OpenAI-compatible API, ready for your existing client code.</p>
+      </div>
+    </div>
+  </div>
 </section>
 
-<!-- Comparison -->
-<section class="comparison">
-    <div class="container">
-        <h2>Ternair vs BitNet</h2>
-        <p class="section-sub">Same brain. Smaller body. Ready to deploy.</p>
-        <div class="comparison-grid">
-            <div class="comp-col comp-ternair">
-                <h3>Ternair</h3>
-                <div class="comp-item win">✅ Load trained BitNet models (bit-exact)</div>
-                <div class="comp-item win">✅ 1.1 GB file (4× smaller)</div>
-                <div class="comp-item win">✅ OpenAI-compatible server</div>
-                <div class="comp-item win">✅ pip install</div>
-                <div class="comp-item win">✅ macOS / Linux / Windows</div>
-                <div class="comp-item win">✅ 1.6 bits/value packing</div>
-            </div>
-            <div class="comp-col comp-bitnet">
-                <h3>bitnet.cpp</h3>
-                <div class="comp-item">✅ Load trained BitNet models</div>
-                <div class="comp-item">~5 GB file (BF16)</div>
-                <div class="comp-item">❌ No official HTTP server</div>
-                <div class="comp-item">❌ C++ build required</div>
-                <div class="comp-item">macOS / Linux only</div>
-                <div class="comp-item">2 bits/value</div>
-            </div>
-        </div>
+<!-- COMPARISON -->
+<section class="section reveal">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow"><span class="trit-dot" style="background:var(--neg)"></span>Comparison</span>
+      <h2>Ternair vs. bitnet.cpp</h2>
+      <p>Same trained weights, same architecture — a lighter file and a server built in.</p>
     </div>
+    <div class="compare">
+      <div class="compare-row head">
+        <div>Capability</div>
+        <div>Ternair</div>
+        <div>bitnet.cpp</div>
+      </div>
+      <div class="compare-row">
+        <div class="feat">Loads trained BitNet checkpoints</div>
+        <div class="win">Bit-exact</div>
+        <div class="neutral">Yes</div>
+      </div>
+      <div class="compare-row">
+        <div class="feat">File size (2B-4T)</div>
+        <div class="win">1.1 GB</div>
+        <div class="neutral">~5 GB (BF16)</div>
+      </div>
+      <div class="compare-row">
+        <div class="feat">HTTP server</div>
+        <div class="win">OpenAI-compatible, built in</div>
+        <div class="neutral">None official</div>
+      </div>
+      <div class="compare-row">
+        <div class="feat">Install</div>
+        <div class="win">pip install</div>
+        <div class="neutral">C++ build required</div>
+      </div>
+      <div class="compare-row">
+        <div class="feat">Platforms</div>
+        <div class="win">macOS · Linux · Windows</div>
+        <div class="neutral">macOS · Linux</div>
+      </div>
+      <div class="compare-row">
+        <div class="feat">Packing density</div>
+        <div class="win">1.6 bits / value</div>
+        <div class="neutral">2 bits / value</div>
+      </div>
+    </div>
+  </div>
 </section>
 
-<!-- Features -->
-<section class="features">
-    <div class="container">
-        <h2>Everything you need</h2>
-        <div class="feature-grid">
-            <div class="feature">
-                <div class="feature-icon">⚡</div>
-                <h3>Ternary Weights</h3>
-                <p>{-1, 0, +1} weights with per-row absmean quantization. Same recipe as BitNet b1.58.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📦</div>
-                <h3>Packed Storage</h3>
-                <p>Base-3 codec: 5 trits/byte (1.6 bits/value). 20% smaller than standard 2-bit packing.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🚀</div>
-                <h3>KV-Cache Inference</h3>
-                <p>Prefill once, decode one token per step. Correct RoPE position offsets. Streaming generation.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🌐</div>
-                <h3>OpenAI API Server</h3>
-                <p>/v1/completions, /v1/chat/completions, /v1/batch, /metrics. Zero external dependencies.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🔧</div>
-                <h3>Multiple Backends</h3>
-                <p>PyTorch (always works), NumPy, Triton GPU, C++ CPU. Automatic fallback per device.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📊</div>
-                <h3>Prometheus Metrics</h3>
-                <p>Requests, tokens/s, latency percentiles. Ready for production monitoring.</p>
-            </div>
-        </div>
+<!-- FEATURES -->
+<section class="section reveal">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow"><span class="trit-dot" style="background:var(--pos)"></span>Under the hood</span>
+      <h2>Everything the server needs</h2>
+      <p>A small, dependency-light stack — from quantization to production metrics.</p>
     </div>
+    <div class="feat-grid">
+      <div class="feat-card">
+        <div class="feat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="5" cy="12" r="2.4"/><circle cx="12" cy="12" r="2.4"/><circle cx="19" cy="12" r="2.4"/></svg>
+        </div>
+        <h3>Ternary weights</h3>
+        <p>{−1, 0, +1} weights with per-row absmean quantization — the same recipe as BitNet b1.58.</p>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 10h16M10 4v16"/></svg>
+        </div>
+        <h3>Packed storage</h3>
+        <p>Base-3 codec: five trits per byte, 1.6 bits per value — 20% smaller than standard 2-bit packing.</p>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="17" width="10" height="4" rx="1"/></svg>
+        </div>
+        <h3>KV-cache inference</h3>
+        <p>One prefill pass, one token per decode step, correct RoPE position offsets, streaming generation.</p>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h16M4 12h10M4 18h16"/><circle cx="19" cy="12" r="2"/></svg>
+        </div>
+        <h3>OpenAI-compatible API</h3>
+        <p><code style="font-family:var(--font-mono);font-size:12.5px">/v1/completions</code>, <code style="font-family:var(--font-mono);font-size:12.5px">/chat/completions</code>, <code style="font-family:var(--font-mono);font-size:12.5px">/batch</code>, <code style="font-family:var(--font-mono);font-size:12.5px">/metrics</code> — zero external services.</p>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 20V10M11 20V4M18 20v-7"/></svg>
+        </div>
+        <h3>Multiple backends</h3>
+        <p>PyTorch, NumPy, Triton GPU, and a native C++ CPU kernel — with automatic fallback per device.</p>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 17l5-6 4 4 9-10"/><path d="M15 5h6v6"/></svg>
+        </div>
+        <h3>Prometheus metrics</h3>
+        <p>Requests, tokens per second, latency percentiles — ready for production monitoring.</p>
+      </div>
+    </div>
+  </div>
 </section>
 
-<!-- Install section -->
-<section class="install-section">
-    <div class="container">
-        <h2>Get started in 30 seconds</h2>
-        <div class="install-code">
-            <div class="code-header">
-                <span class="dot red"></span>
-                <span class="dot yellow"></span>
-                <span class="dot green"></span>
-                <span class="code-title">terminal</span>
-            </div>
-            <pre><code><span class="code-comment"># Install Ternair</span>
-<span class="code-cmd">pip install</span> ternair
-
-<span class="code-comment"># Quick test with a tiny model</span>
-<span class="code-cmd">ternair demo</span>
-
-<span class="code-comment"># Download and serve the real 2B-4T model</span>
-<span class="code-cmd">hf download</span> microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t
-<span class="code-cmd">ternair import-bitnet</span> --source ./bitnet-2b4t --output ./ternair-2b4t --storage packed
-<span class="code-cmd">ternair serve</span> --model ./ternair-2b4t --port 8080</code></pre>
-        </div>
+<!-- INSTALL -->
+<section class="section install-section reveal" id="install">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow"><span class="trit-dot" style="background:var(--zero)"></span>Get started</span>
+      <h2>Running in under a minute</h2>
+      <p>Try it with a tiny demo model, or pull the real 2B-4T checkpoint straight from Hugging Face.</p>
     </div>
+    <div class="terminal">
+      <div class="terminal-head">
+        <span class="tdot"></span><span class="tdot"></span><span class="tdot"></span>
+        <span>zsh</span>
+      </div>
+      <pre><code><span class="c-comment"># install Ternair</span>
+<span class="c-cmd">pip install</span> <span class="c-plain">git+https://github.com/Simonc44/Ternair</span>
+
+<span class="c-comment"># quick sanity check with a tiny model</span>
+<span class="c-cmd">ternair demo</span>
+
+<span class="c-comment"># download and serve the real 2B-4T model</span>
+<span class="c-cmd">hf download</span> <span class="c-plain">microsoft/bitnet-b1.58-2B-4T --local-dir ./bitnet-2b4t</span>
+<span class="c-cmd">ternair import-bitnet</span> <span class="c-plain">--source ./bitnet-2b4t --output ./ternair-2b4t --storage packed</span>
+<span class="c-cmd">ternair serve</span> <span class="c-plain">--model ./ternair-2b4t --port 8080</span></code></pre>
+    </div>
+  </div>
 </section>
 
 <!-- CTA -->
-<section class="cta">
-    <div class="container">
-        <h2>Ready to run BitNet models?</h2>
-        <p>Join the project on GitHub. Open source, Apache 2.0.</p>
-        <div class="cta-actions">
-            <a href="https://github.com/Simonc44/Ternair" class="btn btn-primary btn-large">⭐ Star on GitHub</a>
-            <a href="https://github.com/Simonc44/Ternair#readme" class="btn btn-secondary btn-large">Read the Docs →</a>
-        </div>
+<section class="cta reveal">
+  <div class="container">
+    <span class="eyebrow" style="justify-content:center"><span class="trit-dot" style="background:var(--pos)"></span>Open source</span>
+    <h2 style="margin-top:14px">Ready to run BitNet models?</h2>
+    <p>Apache 2.0. Issues and pull requests are welcome on GitHub.</p>
+    <div class="cta-actions">
+      <a href="https://github.com/Simonc44/Ternair" class="btn btn-primary">Star on GitHub</a>
+      <a href="https://github.com/Simonc44/Ternair#readme" class="btn btn-outline">Read the docs</a>
     </div>
+  </div>
 </section>
 
-<!-- Footer -->
 <footer>
-    <div class="container">
-        <div class="footer-content">
-            <div class="footer-brand">
-                <strong>Ternair</strong> · Apache 2.0
-            </div>
-            <div class="footer-links">
-                <a href="https://github.com/Simonc44/Ternair">GitHub</a>
-                <a href="https://github.com/Simonc44/Ternair#readme">Docs</a>
-                <a href="https://pypi.org/project/ternair/">PyPI</a>
-            </div>
-        </div>
+  <div class="container footer-inner">
+    <div class="footer-brand">
+      <span class="logo-mark"><span></span><span></span><span></span></span>
+      Ternair · Apache 2.0
     </div>
+    <div class="footer-links">
+      <a href="https://github.com/Simonc44/Ternair">GitHub</a>
+      <a href="https://github.com/Simonc44/Ternair#readme">Docs</a>
+      <a href="https://pypi.org/project/ternair/">PyPI</a>
+    </div>
+  </div>
 </footer>
+
+<script>
+  // subtle scroll-reveal, no-op if reduced motion is preferred
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches && 'IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('is-visible'); io.unobserve(e.target); } });
+    }, { threshold: 0.12 });
+    document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+  } else {
+    document.querySelectorAll('.reveal').forEach(el => el.classList.add('is-visible'));
+  }
+</script>
 
 </body>
 </html>
