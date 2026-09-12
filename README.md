@@ -234,6 +234,10 @@ scripts/          training, demo, and CI helpers
 docs/             mkdocs documentation (API, CLI, server, benchmarks)
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=simonc44/ternair&type=date&legend=top-left)](https://www.star-history.com/?repos=simonc44%2Fternair&type=date&legend=top-left)
+
 ## Contributing
 
 Add a regression test for bug fixes, keep public API changes documented, and run the relevant tests before opening a pull request.
