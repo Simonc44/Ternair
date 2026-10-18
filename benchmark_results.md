@@ -4,14 +4,14 @@
 > Tokenizer: char-256  
 > Training steps: 500  
 > Device: cpu  
-> Date: 2026-10-11T09:55:53
+> Date: 2026-10-18T08:00:16
 
 | Model | PPL (WikiText-2 test) | Size (MiB) | Tokens/sec |
 |-------|---------------------|------------|------------|
-| Ternair (ternary) | 13.13 | 0.8 | 284.9 |
-| FP16 baseline | 23.36 | 26.4 | 4043.4 |
+| Ternair (ternary) | 13.73 | 0.8 | 386.9 |
+| FP16 baseline | 23.38 | 26.4 | 3833.4 |
 
 **Summary:**
-- PPL overhead vs FP16: -10.23 (-43.8%)
+- PPL overhead vs FP16: -9.65 (-41.3%)
 - Size compression: 33.4×
-- Speed ratio: 0.07×
+- Speed ratio: 0.10×
