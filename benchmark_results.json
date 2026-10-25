@@ -6,35 +6,35 @@
     "seq_len": 128,
     "device": "cpu",
     "tokenizer": "char-256",
-    "date": "2026-10-18T08:00:16"
+    "date": "2026-10-25T08:21:11"
   },
   "models": {
     "Ternair (ternary)": {
-      "perplexity": 13.733,
+      "perplexity": 13.3015,
       "num_tokens": 39870,
       "size_mib": 0.79,
-      "tokens_per_sec": 386.94,
+      "tokens_per_sec": 378.25,
       "params": 2809184
     },
     "FP16 baseline": {
-      "perplexity": 23.3806,
+      "perplexity": 23.3679,
       "num_tokens": 39870,
       "size_mib": 26.35,
-      "tokens_per_sec": 3833.43,
+      "tokens_per_sec": 4044.29,
       "params": 6908416
     },
     "ternair": {
-      "perplexity": 13.733,
+      "perplexity": 13.3015,
       "num_tokens": 39870,
       "size_mib": 0.79,
-      "tokens_per_sec": 386.94,
+      "tokens_per_sec": 378.25,
       "params": 2809184
     },
     "fp16": {
-      "perplexity": 23.3806,
+      "perplexity": 23.3679,
       "num_tokens": 39870,
       "size_mib": 26.35,
-      "tokens_per_sec": 3833.43,
+      "tokens_per_sec": 4044.29,
       "params": 6908416
     }
   }
